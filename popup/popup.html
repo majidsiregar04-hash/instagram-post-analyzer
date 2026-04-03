@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instagram Comment Analyzer</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>📊 IG Comment Analyzer</h1>
+
+    <!-- API Key Section -->
+    <div class="section" id="api-section">
+      <label for="api-key">Gemini API Key</label>
+      <div class="input-row">
+        <input type="password" id="api-key" placeholder="Masukkan API key...">
+        <button id="save-key" class="btn-small">Simpan</button>
+      </div>
+      <p id="key-status" class="status-text"></p>
+    </div>
+
+    <!-- Settings Section -->
+    <div class="section">
+      <label for="comment-limit">Batas Komentar</label>
+      <select id="comment-limit">
+        <option value="50">50 komentar</option>
+        <option value="100" selected>100 komentar</option>
+        <option value="200">200 komentar</option>
+        <option value="500">500 komentar</option>
+        <option value="0">Semua komentar</option>
+      </select>
+    </div>
+
+    <!-- Action Button -->
+    <button id="scrape-btn" class="btn-primary" disabled>
+      Scrape & Analisis Komentar
+    </button>
+
+    <!-- Progress Section -->
+    <div id="progress-section" class="section hidden">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <p id="progress-text" class="status-text">Memulai...</p>
+    </div>
+
+    <!-- Error Section -->
+    <div id="error-section" class="section hidden">
+      <div class="error-box">
+        <p id="error-text"></p>
+      </div>
+    </div>
+
+    <!-- Results Section -->
+    <div id="results-section" class="section hidden">
+      <div class="result-header">
+        <h2>Hasil Analisis</h2>
+        <span id="comment-count" class="badge"></span>
+      </div>
+
+      <div class="result-card">
+        <h3>📝 Ringkasan</h3>
+        <p id="result-summary"></p>
+      </div>
+
+      <div class="result-card">
+        <h3>💬 Sentimen</h3>
+        <div id="result-sentiment"></div>
+      </div>
+
+      <div class="result-card">
+        <h3>🔖 Topik Utama</h3>
+        <div id="result-topics"></div>
+      </div>
+
+      <div class="result-card">
+        <h3>⭐ Komentar Menarik</h3>
+        <div id="result-highlights"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

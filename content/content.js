@@ -231,6 +231,16 @@ function extractCommentsFromDOM(postOwner) {
 
 // Parse a comment from an <li> element
 function parseCommentFromLi(li) {
+  // Skip <li> elements that are part of the likes section
+  const liText = li.textContent || '';
+  if (isNonCommentText(liText.trim())) return null;
+
+  // Also check if the li contains "liked by" / "disukai oleh" anywhere
+  if (/liked\s+by\s+.+\s+and\s+\d+/i.test(liText) ||
+      /disukai\s+oleh\s+.+\s+dan\s+\d+/i.test(liText)) {
+    return null;
+  }
+
   // Find username link
   const usernameLink = findUsernameLink(li);
   if (!usernameLink) return null;
@@ -256,7 +266,10 @@ function parseCommentFromLi(li) {
 }
 
 function findUsernameLink(li) {
-  const links = li.querySelectorAll('a[href^="/"]');
+  // The comment author username is always the FIRST link in the comment <li>.
+  // Mentioned usernames (@someone) appear later inside the comment text.
+  // We only look at links in the first few levels of depth, not deep inside text spans.
+  const links = li.querySelectorAll(':scope > div a[href^="/"], :scope > div > div a[href^="/"]');
   for (const link of links) {
     const href = link.getAttribute('href');
     if (!href || href === '/' || href.includes('/p/') || href.includes('/reel/')
@@ -265,6 +278,20 @@ function findUsernameLink(li) {
     const cleanHref = href.replace(/\//g, '');
     if (cleanHref.length > 0 && cleanHref.length <= 30 && !cleanHref.includes('?')) {
       return link;
+    }
+  }
+  // Fallback: first link in the li
+  const allLinks = li.querySelectorAll('a[href^="/"]');
+  if (allLinks.length > 0) {
+    const link = allLinks[0];
+    const href = link.getAttribute('href');
+    if (href && href !== '/' && !href.includes('/p/') && !href.includes('/reel/')
+      && !href.includes('/explore/') && !href.includes('/stories/')
+      && !href.includes('/accounts/')) {
+      const cleanHref = href.replace(/\//g, '');
+      if (cleanHref.length > 0 && cleanHref.length <= 30 && !cleanHref.includes('?')) {
+        return link;
+      }
     }
   }
   return null;
@@ -288,12 +315,15 @@ function extractCommentText(li, username) {
     // Skip if it's the username
     if (text === username) continue;
 
-    // Skip action text and timestamps
-    if (isActionText(text) || isTimestamp(text)) continue;
+    // Skip action text, timestamps, and non-comment text (likes, etc.)
+    if (isActionText(text) || isTimestamp(text) || isNonCommentText(text)) continue;
 
     // This span contains comment text - collect it with emoji support
     const fullText = collectSpanText(span, username);
     if (!fullText) continue;
+
+    // Skip if collected text is non-comment
+    if (isNonCommentText(fullText)) continue;
 
     // Pick the longest valid text (the actual comment, not fragments)
     if (fullText.length > bestText.length) {
@@ -310,6 +340,9 @@ function extractCommentText(li, username) {
       bestText = bestText.slice(0, -username.length).trim();
     }
   }
+
+  // Final check: reject non-comment text after cleanup
+  if (bestText && isNonCommentText(bestText)) return '';
 
   return bestText;
 }
@@ -381,7 +414,7 @@ function extractCommentsFallback(postOwner) {
     for (const span of spans) {
       const text = span.textContent?.trim();
       if (text && text !== username && text.length > 1 && text.length < 2000
-        && !isTimestamp(text) && !isActionText(text)) {
+        && !isTimestamp(text) && !isActionText(text) && !isNonCommentText(text)) {
         comments.push({
           username: username,
           text: text,
@@ -435,6 +468,34 @@ function isActionText(text) {
     /^(more|lagi|selengkapnya)$/i,
     /^\d+\s*(likes?|suka)$/i,
     /^(send|kirim)$/i
+  ];
+  return patterns.some(p => p.test(lower));
+}
+
+// Detect non-comment text: likes section, "others" text, engagement info
+function isNonCommentText(text) {
+  const lower = text.toLowerCase().trim();
+  const patterns = [
+    // "Liked by X and 598 others" / "Disukai oleh X dan 598 lainnya"
+    /^liked\s+by\s+.+\s+and\s+\d+/i,
+    /^disukai\s+oleh\s+.+\s+dan\s+\d+/i,
+    /^liked\s+by\s+/i,
+    /^disukai\s+oleh\s+/i,
+    // "X others" / "X lainnya"
+    /^\d+\s+(others?|lainnya)$/i,
+    // "and X others" / "dan X lainnya"
+    /^(and|dan)\s+\d+\s+(others?|lainnya)/i,
+    // View likes
+    /^view\s+all\s+\d+\s+likes?$/i,
+    /^lihat\s+semua\s+\d+\s+suka$/i,
+    // "X likes" standalone
+    /^\d[\d,.]+\s*(likes?|suka)$/i,
+    // Post date text
+    /^\d+\s*(January|February|March|April|May|June|July|August|September|October|November|December|Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember)/i,
+    // "Add a comment" placeholder
+    /^(add\s+a\s+comment|tambahkan\s+komentar)/i,
+    // "Log in to like" etc.
+    /^(log\s+in|masuk)\s+/i
   ];
   return patterns.some(p => p.test(lower));
 }

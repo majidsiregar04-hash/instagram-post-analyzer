@@ -104,7 +104,33 @@ async function scrapeComments(limit) {
     await waitForDOMUpdate(800);
   }
 
-  return limit > 0 ? comments.slice(0, limit) : comments;
+  const result = limit > 0 ? comments.slice(0, limit) : comments;
+
+  // Final dedup pass: remove comments where text is a substring of another comment from same user
+  return deduplicateSubstrings(result);
+}
+
+function deduplicateSubstrings(comments) {
+  const toRemove = new Set();
+  for (let i = 0; i < comments.length; i++) {
+    if (toRemove.has(i)) continue;
+    const textI = comments[i].text.toLowerCase().replace(/\s+/g, ' ').trim();
+    const userI = comments[i].username.toLowerCase();
+    for (let j = i + 1; j < comments.length; j++) {
+      if (toRemove.has(j)) continue;
+      const textJ = comments[j].text.toLowerCase().replace(/\s+/g, ' ').trim();
+      const userJ = comments[j].username.toLowerCase();
+      if (userI !== userJ) continue;
+      // If one is substring of the other, keep the longer one
+      if (textI.includes(textJ)) {
+        toRemove.add(j);
+      } else if (textJ.includes(textI)) {
+        toRemove.add(i);
+        break;
+      }
+    }
+  }
+  return comments.filter((_, idx) => !toRemove.has(idx));
 }
 
 function extractCommentsFromDOM(postOwner) {
@@ -275,7 +301,7 @@ function collectCommentText(li, username) {
     // Prefer shallower spans (closer to the comment root)
     if (depth < bestDepth || (depth === bestDepth && text.length > bestText.length)) {
       // Try to get full text including emoji by going up to parent and collecting all child text
-      const fullText = collectAdjacentSpanText(span);
+      const fullText = collectAdjacentSpanText(span, username);
       if (fullText.length >= text.length) {
         bestText = fullText;
       } else {
@@ -285,45 +311,65 @@ function collectCommentText(li, username) {
     }
   }
 
+  // Strip username from result if it appears at start/end
+  if (bestText && username) {
+    if (bestText.toLowerCase().startsWith(username.toLowerCase())) {
+      bestText = bestText.slice(username.length).trim();
+    }
+    if (bestText.toLowerCase().endsWith(username.toLowerCase())) {
+      bestText = bestText.slice(0, -username.length).trim();
+    }
+  }
+
   return bestText;
 }
 
 // Collect text from a span and its adjacent sibling spans (emoji splitting fix)
-function collectAdjacentSpanText(span) {
+function collectAdjacentSpanText(span, username) {
   const parent = span.parentElement;
   if (!parent) return span.textContent?.trim() || '';
 
-  // If parent has multiple child spans, concatenate them all
+  // Collect text from sibling nodes, but filter out username/action/timestamp text
   const children = parent.childNodes;
   let combinedText = '';
-  let foundTarget = false;
 
   for (const child of children) {
-    if (child === span) foundTarget = true;
+    let childText = '';
     if (child.nodeType === Node.TEXT_NODE) {
-      combinedText += child.textContent;
+      childText = child.textContent || '';
     } else if (child.nodeType === Node.ELEMENT_NODE) {
       const tag = child.tagName?.toLowerCase();
-      // Include spans and inline elements, skip block elements
-      if (tag === 'span' || tag === 'a' || tag === 'br' || tag === 'img') {
-        if (tag === 'img') {
-          combinedText += child.alt || '';
-        } else {
-          combinedText += child.textContent || '';
-        }
+      if (tag === 'img') {
+        childText = child.alt || '';
+      } else if (tag === 'span' || tag === 'a' || tag === 'br') {
+        childText = child.textContent || '';
       }
     }
+
+    const trimmed = childText.trim();
+    // Skip if this child's text is the username, action text, or timestamp
+    if (trimmed && trimmed === username) continue;
+    if (trimmed && isActionText(trimmed)) continue;
+    if (trimmed && isTimestamp(trimmed)) continue;
+
+    combinedText += childText;
   }
 
   // Normalize whitespace
   combinedText = combinedText.replace(/\s+/g, ' ').trim();
 
-  // Only return combined text if it's meaningful and not just action text
+  // Sanity check: if combined text is unreasonably longer than the original span,
+  // it probably grabbed too much - fall back to original span text
+  const originalText = span.textContent?.trim() || '';
+  if (combinedText.length > originalText.length * 2.5 && originalText.length > 5) {
+    return originalText;
+  }
+
   if (combinedText && !isActionText(combinedText) && combinedText.length > 1) {
     return combinedText;
   }
 
-  return span.textContent?.trim() || '';
+  return originalText;
 }
 
 function collectTextFromContainer(container, username) {
@@ -332,7 +378,7 @@ function collectTextFromContainer(container, username) {
     const text = span.textContent?.trim();
     if (text && text !== username && text.length > 1 && text.length < 2000
       && !isTimestamp(text) && !isActionText(text)) {
-      const fullText = collectAdjacentSpanText(span);
+      const fullText = collectAdjacentSpanText(span, username);
       return fullText || text;
     }
   }

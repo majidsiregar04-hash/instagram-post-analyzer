@@ -5,8 +5,7 @@
   "version": "1.0.0",
   "permissions": [
     "activeTab",
-    "storage",
-    "scripting"
+    "storage"
   ],
   "host_permissions": [
     "https://www.instagram.com/*",

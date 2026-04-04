@@ -69,7 +69,9 @@ async function scrapeComments(limit) {
     const extracted = extractCommentsFromDOM(postOwner);
 
     for (const comment of extracted) {
-      const key = comment.username + '::' + comment.text;
+      // Normalize dedup key: collapse whitespace, lowercase
+      const normalizedText = comment.text.replace(/\s+/g, ' ').trim().toLowerCase();
+      const key = comment.username.toLowerCase() + '::' + normalizedText;
       if (!seenTexts.has(key)) {
         seenTexts.add(key);
         comments.push(comment);
@@ -108,21 +110,34 @@ async function scrapeComments(limit) {
 function extractCommentsFromDOM(postOwner) {
   const comments = [];
   const root = getPostRoot();
+  const parsedLis = new Set(); // Track parsed <li> elements to avoid duplicates
 
   // Strategy 1: Find comment lists within the article
+  // Only iterate top-level <ul> (skip nested reply <ul> in outer loop)
   const commentLists = root.querySelectorAll('ul');
 
   for (const ul of commentLists) {
+    // Skip this <ul> if it's nested inside an <li> that's inside another <ul>
+    // (i.e., it's a reply sub-list, not the main comment list)
+    const parentLi = ul.parentElement?.closest('li');
+    if (parentLi && parentLi.closest('ul') && root.contains(parentLi.closest('ul'))) {
+      // This is a nested reply list - skip in outer loop, will be handled in inner loop
+      const grandParentUl = parentLi.closest('ul');
+      if (grandParentUl !== ul && root.contains(grandParentUl)) continue;
+    }
+
     const items = ul.querySelectorAll(':scope > li');
     if (items.length === 0) continue;
 
     let isFirst = true;
     for (const li of items) {
+      if (parsedLis.has(li)) continue;
+      parsedLis.add(li);
+
       const comment = parseCommentElement(li);
       if (comment) {
         // Skip caption (first comment from post owner)
         if (isFirst && postOwner && comment.username === postOwner) {
-          comment.isCaption = true;
           isFirst = false;
           continue;
         }
@@ -135,6 +150,9 @@ function extractCommentsFromDOM(postOwner) {
       for (const replyUl of replyLists) {
         const replyItems = replyUl.querySelectorAll(':scope > li');
         for (const replyLi of replyItems) {
+          if (parsedLis.has(replyLi)) continue;
+          parsedLis.add(replyLi);
+
           const reply = parseCommentElement(replyLi);
           if (reply) {
             reply.isReply = true;
@@ -297,7 +315,8 @@ function collectAdjacentSpanText(span) {
     }
   }
 
-  combinedText = combinedText.trim();
+  // Normalize whitespace
+  combinedText = combinedText.replace(/\s+/g, ' ').trim();
 
   // Only return combined text if it's meaningful and not just action text
   if (combinedText && !isActionText(combinedText) && combinedText.length > 1) {

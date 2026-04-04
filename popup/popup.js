@@ -598,17 +598,28 @@ function openPrintPage(analysis, comments, categorized) {
   <button class="print-btn" onclick="window.print()">Cetak / Save as PDF</button>
 </div>
 
-<script>
-  window.onload = function() {
-    setTimeout(function() { window.print(); }, 500);
-  };
-</script>
 </body>
 </html>`;
 
   const blob = new Blob([html], { type: 'text/html' });
   const url = URL.createObjectURL(blob);
-  chrome.tabs.create({ url: url });
+  chrome.tabs.create({ url: url }, (tab) => {
+    // Use chrome.scripting.executeScript to auto-trigger print dialog
+    // after the tab finishes loading
+    const tabId = tab.id;
+    const listener = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        chrome.tabs.onUpdated.removeListener(listener);
+        setTimeout(() => {
+          chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            func: () => { window.print(); }
+          });
+        }, 600);
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+  });
 }
 
 // Escape HTML for use in template strings (not DOM-based)

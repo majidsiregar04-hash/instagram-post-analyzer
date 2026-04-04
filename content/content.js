@@ -7,14 +7,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .catch((err) => sendResponse({ error: err.message }));
     return true;
   }
+  if (request.action === 'ping') {
+    sendResponse({ pong: true });
+    return;
+  }
 });
 
 // Helper: find the correct root element (handles modal view vs direct page)
 function getPostRoot() {
-  // Modal view (post opened from feed/explore)
   const dialog = document.querySelector('div[role="dialog"] article');
   if (dialog) return dialog;
-  // Direct page view
   const article = document.querySelector('article[role="presentation"]')
     || document.querySelector('article');
   return article || document;
@@ -23,7 +25,6 @@ function getPostRoot() {
 // Detect the post owner username from the article header
 function getPostOwnerUsername() {
   const root = getPostRoot();
-  // The first username link in the header area is typically the post owner
   const header = root.querySelector('header');
   if (header) {
     const link = header.querySelector('a[href^="/"]');
@@ -38,15 +39,12 @@ function getPostOwnerUsername() {
 }
 
 async function scrapeComments(limit) {
-  // Expand truncated comments first
   await expandTruncatedComments();
-
-  // Try to expand all comments
   await clickViewAllComments();
   await sleep(1000);
 
   const comments = [];
-  const seenTexts = new Set();
+  const seenKeys = new Set();
   let scrollAttempts = 0;
   const maxScrollAttempts = limit === 0 ? 200 : Math.ceil(limit / 10) + 20;
   let previousCount = 0;
@@ -54,36 +52,26 @@ async function scrapeComments(limit) {
   const postOwner = getPostOwnerUsername();
 
   while (true) {
-    // Try to click "View all comments" again
     await clickViewAllComments();
-
-    // Expand reply threads (with retry)
     await expandReplies();
     await sleep(300);
-    await expandReplies(); // retry for newly appeared buttons
-
-    // Expand truncated comments
+    await expandReplies();
     await expandTruncatedComments();
 
-    // Extract comments currently in the DOM
     const extracted = extractCommentsFromDOM(postOwner);
 
     for (const comment of extracted) {
-      // Normalize dedup key: collapse whitespace, lowercase
-      const normalizedText = comment.text.replace(/\s+/g, ' ').trim().toLowerCase();
-      const key = comment.username.toLowerCase() + '::' + normalizedText;
-      if (!seenTexts.has(key)) {
-        seenTexts.add(key);
+      const key = makeDedupeKey(comment.username, comment.text);
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
         comments.push(comment);
       }
     }
 
-    // Check if we reached the limit
     if (limit > 0 && comments.length >= limit) {
-      return comments.slice(0, limit);
+      return deduplicateFinal(comments.slice(0, limit));
     }
 
-    // Check if we've exhausted scrolling
     if (comments.length === previousCount) {
       noNewCount++;
     } else {
@@ -91,63 +79,109 @@ async function scrapeComments(limit) {
       previousCount = comments.length;
     }
 
-    // Stop if no new comments after 8 consecutive scroll attempts
     if (noNewCount >= 8 || scrollAttempts >= maxScrollAttempts) {
       break;
     }
 
-    // Try to load more comments
     await loadMoreComments();
     scrollAttempts++;
-
-    // Wait for DOM to update
     await waitForDOMUpdate(800);
   }
 
   const result = limit > 0 ? comments.slice(0, limit) : comments;
-
-  // Final dedup pass: remove comments where text is a substring of another comment from same user
-  return deduplicateSubstrings(result);
+  return deduplicateFinal(result);
 }
 
-function deduplicateSubstrings(comments) {
+// Create a normalized dedup key
+function makeDedupeKey(username, text) {
+  const normUser = username.toLowerCase().trim();
+  // Normalize: lowercase, collapse whitespace, remove zero-width chars
+  const normText = text
+    .toLowerCase()
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return normUser + '::' + normText;
+}
+
+// Final dedup: remove substring duplicates AND fuzzy duplicates from same user
+function deduplicateFinal(comments) {
   const toRemove = new Set();
+
   for (let i = 0; i < comments.length; i++) {
     if (toRemove.has(i)) continue;
-    const textI = comments[i].text.toLowerCase().replace(/\s+/g, ' ').trim();
     const userI = comments[i].username.toLowerCase();
+    const textI = comments[i].text.replace(/\s+/g, ' ').trim().toLowerCase();
+
     for (let j = i + 1; j < comments.length; j++) {
       if (toRemove.has(j)) continue;
-      const textJ = comments[j].text.toLowerCase().replace(/\s+/g, ' ').trim();
       const userJ = comments[j].username.toLowerCase();
       if (userI !== userJ) continue;
-      // If one is substring of the other, keep the longer one
+
+      const textJ = comments[j].text.replace(/\s+/g, ' ').trim().toLowerCase();
+
+      // Substring check
       if (textI.includes(textJ)) {
         toRemove.add(j);
-      } else if (textJ.includes(textI)) {
+        continue;
+      }
+      if (textJ.includes(textI)) {
         toRemove.add(i);
         break;
       }
+
+      // Fuzzy similarity check (for near-duplicate with slight differences)
+      if (similarity(textI, textJ) > 0.85) {
+        // Keep the longer one
+        if (textI.length >= textJ.length) {
+          toRemove.add(j);
+        } else {
+          toRemove.add(i);
+          break;
+        }
+      }
     }
   }
+
   return comments.filter((_, idx) => !toRemove.has(idx));
+}
+
+// Simple similarity ratio (bigram-based Dice coefficient)
+function similarity(a, b) {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+
+  const bigramsA = new Map();
+  for (let i = 0; i < a.length - 1; i++) {
+    const bigram = a.substring(i, i + 2);
+    bigramsA.set(bigram, (bigramsA.get(bigram) || 0) + 1);
+  }
+
+  let matches = 0;
+  for (let i = 0; i < b.length - 1; i++) {
+    const bigram = b.substring(i, i + 2);
+    const count = bigramsA.get(bigram) || 0;
+    if (count > 0) {
+      bigramsA.set(bigram, count - 1);
+      matches++;
+    }
+  }
+
+  return (2 * matches) / (a.length - 1 + b.length - 1);
 }
 
 function extractCommentsFromDOM(postOwner) {
   const comments = [];
   const root = getPostRoot();
-  const parsedLis = new Set(); // Track parsed <li> elements to avoid duplicates
+  const processedLis = new Set();
 
-  // Strategy 1: Find comment lists within the article
-  // Only iterate top-level <ul> (skip nested reply <ul> in outer loop)
+  // Find all comment <ul> lists within the article
   const commentLists = root.querySelectorAll('ul');
 
   for (const ul of commentLists) {
-    // Skip this <ul> if it's nested inside an <li> that's inside another <ul>
-    // (i.e., it's a reply sub-list, not the main comment list)
+    // Skip nested reply lists in outer loop
     const parentLi = ul.parentElement?.closest('li');
     if (parentLi && parentLi.closest('ul') && root.contains(parentLi.closest('ul'))) {
-      // This is a nested reply list - skip in outer loop, will be handled in inner loop
       const grandParentUl = parentLi.closest('ul');
       if (grandParentUl !== ul && root.contains(grandParentUl)) continue;
     }
@@ -157,12 +191,11 @@ function extractCommentsFromDOM(postOwner) {
 
     let isFirst = true;
     for (const li of items) {
-      if (parsedLis.has(li)) continue;
-      parsedLis.add(li);
+      if (processedLis.has(li)) continue;
+      processedLis.add(li);
 
-      const comment = parseCommentElement(li);
+      const comment = parseCommentFromLi(li);
       if (comment) {
-        // Skip caption (first comment from post owner)
         if (isFirst && postOwner && comment.username === postOwner) {
           isFirst = false;
           continue;
@@ -171,15 +204,15 @@ function extractCommentsFromDOM(postOwner) {
         comments.push(comment);
       }
 
-      // Also extract replies within this li (nested ul > li)
+      // Extract replies within this li
       const replyLists = li.querySelectorAll('ul');
       for (const replyUl of replyLists) {
         const replyItems = replyUl.querySelectorAll(':scope > li');
         for (const replyLi of replyItems) {
-          if (parsedLis.has(replyLi)) continue;
-          parsedLis.add(replyLi);
+          if (processedLis.has(replyLi)) continue;
+          processedLis.add(replyLi);
 
-          const reply = parseCommentElement(replyLi);
+          const reply = parseCommentFromLi(replyLi);
           if (reply) {
             reply.isReply = true;
             comments.push(reply);
@@ -189,12 +222,190 @@ function extractCommentsFromDOM(postOwner) {
     }
   }
 
-  // Strategy 2: If strategy 1 found nothing, try fallback
   if (comments.length === 0) {
     return extractCommentsFallback(postOwner);
   }
 
   return comments;
+}
+
+// Simplified comment parser: find username, then get text from the right container
+function parseCommentFromLi(li) {
+  // Find username link
+  const usernameLink = findUsernameLink(li);
+  if (!usernameLink) return null;
+
+  const href = usernameLink.getAttribute('href');
+  if (!href || href === '/') return null;
+
+  const username = href.replace(/\//g, '');
+  if (!username || username.includes('?') || username.includes('explore')
+    || username.length > 30) return null;
+
+  // Strategy: find the text container that holds the comment
+  // In Instagram's DOM, the comment text is typically in a <span> container
+  // that is a sibling or near-sibling of the username element
+  const commentText = extractCommentText(li, username, usernameLink);
+
+  if (!commentText || commentText.length < 1) return null;
+
+  return {
+    username: username,
+    text: commentText,
+    timestamp: extractTimestamp(li),
+    isReply: false
+  };
+}
+
+function findUsernameLink(li) {
+  // Try direct children first
+  const links = li.querySelectorAll('a[href^="/"]');
+  for (const link of links) {
+    const href = link.getAttribute('href');
+    if (!href || href === '/' || href.includes('/p/') || href.includes('/reel/')
+      || href.includes('/explore/') || href.includes('/stories/')
+      || href.includes('/accounts/')) continue;
+    // Check it looks like a username link (short text, no weird paths)
+    const text = link.textContent?.trim();
+    if (text && text.length > 0 && text.length <= 30 && !text.includes(' ')) {
+      return link;
+    }
+    // Also accept if href is simple /username/
+    const cleanHref = href.replace(/\//g, '');
+    if (cleanHref.length > 0 && cleanHref.length <= 30 && !cleanHref.includes('?')) {
+      return link;
+    }
+  }
+  return null;
+}
+
+// Extract comment text using innerText from the right container
+function extractCommentText(li, username, usernameLink) {
+  // Find the container that holds both the username and the comment text
+  // Walk up from usernameLink to find the comment content div
+  // Then get its full text and strip the username part
+
+  // Approach 1: Find the closest common container of username + comment text
+  // In IG's DOM, the comment is in a span near the username span
+  // The parent of the username link often contains the comment text too
+
+  // Try: get the parent container that holds the comment block
+  let textContainer = usernameLink.parentElement;
+
+  // Walk up a few levels to find a container with substantial text
+  for (let i = 0; i < 4; i++) {
+    if (!textContainer || textContainer === li) break;
+    const innerText = getCleanInnerText(textContainer);
+    // If this container has more text than just the username, use it
+    if (innerText.length > username.length + 5) {
+      break;
+    }
+    textContainer = textContainer.parentElement;
+  }
+
+  if (!textContainer || textContainer === li) {
+    // Fallback: use the li's direct text content approach
+    textContainer = li;
+  }
+
+  // Get innerText of the text container
+  let fullText = getCleanInnerText(textContainer);
+
+  // Strip the username from the beginning
+  if (fullText.startsWith(username)) {
+    fullText = fullText.slice(username.length).trim();
+  }
+  // Also handle case-insensitive match
+  if (fullText.toLowerCase().startsWith(username.toLowerCase())) {
+    fullText = fullText.slice(username.length).trim();
+  }
+
+  // Remove trailing action texts (Reply, Balas, timestamps, likes count, etc.)
+  fullText = stripTrailingActions(fullText);
+
+  // Remove leading/trailing whitespace and normalize
+  fullText = fullText.replace(/\s+/g, ' ').trim();
+
+  // Validate: not too short, not just action text
+  if (!fullText || fullText.length < 1 || isActionText(fullText) || isTimestamp(fullText)) {
+    return null;
+  }
+
+  return fullText;
+}
+
+// Get cleaned innerText, excluding nested reply lists and action buttons
+function getCleanInnerText(element) {
+  // Clone the element to manipulate without affecting DOM
+  const clone = element.cloneNode(true);
+
+  // Remove nested <ul> elements (reply threads)
+  clone.querySelectorAll('ul').forEach(ul => ul.remove());
+
+  // Remove time elements
+  clone.querySelectorAll('time').forEach(t => t.remove());
+
+  // Remove buttons that are action buttons (Reply, Like, etc.)
+  clone.querySelectorAll('button').forEach(btn => {
+    const text = btn.textContent?.trim()?.toLowerCase() || '';
+    if (isActionText(text) || text.length < 15) {
+      btn.remove();
+    }
+  });
+
+  // Remove "View replies" / "Lihat balasan" spans/divs
+  clone.querySelectorAll('span, div[role="button"]').forEach(el => {
+    const text = el.textContent?.trim()?.toLowerCase() || '';
+    if (isActionText(text) || isTimestamp(text)) {
+      el.remove();
+    }
+  });
+
+  // Remove SVG icons
+  clone.querySelectorAll('svg').forEach(svg => svg.remove());
+
+  // Get the remaining text
+  let text = clone.innerText || clone.textContent || '';
+
+  // Replace image alt text (emoji) properly
+  // Actually innerText should handle this fine
+
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+// Strip trailing action text patterns from comment text
+function stripTrailingActions(text) {
+  // Common trailing patterns: "Reply", "Balas", "1h", "2d", "3 suka", etc.
+  // These appear after the comment text in the container
+  const trailingPatterns = [
+    /\s+(Reply|Balas|Suka|Like|Liked|Send|Kirim)\s*$/i,
+    /\s+\d+\s*(jam|menit|detik|hari|minggu|bulan|tahun)\s*(yang\s+lalu|lalu)?\s*$/i,
+    /\s+\d+\s*(hour|minute|second|day|week|month|year)s?\s*ago\s*$/i,
+    /\s+\d+[smhdwSMHDW]\s*$/,
+    /\s+\d+\s*(likes?|suka)\s*$/i,
+    /\s+(just now|baru saja)\s*$/i,
+    /\s+See translation\s*$/i,
+    /\s+Lihat terjemahan\s*$/i,
+    /\s+(Edited|Diedit)\s*$/i,
+    /\s+\d{1,2}\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s*$/i
+  ];
+
+  let result = text;
+  let changed = true;
+  let iterations = 0;
+  while (changed && iterations < 5) {
+    changed = false;
+    iterations++;
+    for (const pattern of trailingPatterns) {
+      const newResult = result.replace(pattern, '');
+      if (newResult !== result) {
+        result = newResult;
+        changed = true;
+      }
+    }
+  }
+
+  return result.trim();
 }
 
 function extractCommentsFallback(postOwner) {
@@ -209,7 +420,7 @@ function extractCommentsFallback(postOwner) {
 
     const username = href.replace(/\//g, '');
     if (!username || username.includes('?') || username.length > 30) continue;
-    if (username === postOwner) continue; // skip post owner in fallback
+    if (username === postOwner) continue;
 
     const container = link.closest('div[role="button"]')?.parentElement
       || link.closest('li')
@@ -217,182 +428,23 @@ function extractCommentsFallback(postOwner) {
 
     if (!container) continue;
 
-    const text = collectTextFromContainer(container, username);
-    if (text) {
-      comments.push({
-        username: username,
-        text: text,
-        timestamp: extractTimestamp(container),
-        isReply: false
-      });
+    const spans = container.querySelectorAll('span[dir="auto"]');
+    for (const span of spans) {
+      const text = span.textContent?.trim();
+      if (text && text !== username && text.length > 1 && text.length < 2000
+        && !isTimestamp(text) && !isActionText(text)) {
+        comments.push({
+          username: username,
+          text: text,
+          timestamp: extractTimestamp(container),
+          isReply: false
+        });
+        break;
+      }
     }
   }
 
   return comments;
-}
-
-function parseCommentElement(li) {
-  // Find username link within the comment
-  const usernameLinks = li.querySelectorAll(':scope > div a[href^="/"], :scope > div > div a[href^="/"]');
-  let usernameLink = null;
-
-  for (const link of usernameLinks) {
-    const href = link.getAttribute('href');
-    if (!href || href === '/' || href.includes('/p/') || href.includes('/reel/')
-      || href.includes('/explore/') || href.includes('/stories/')) continue;
-    usernameLink = link;
-    break;
-  }
-
-  if (!usernameLink) {
-    usernameLink = li.querySelector('a[href^="/"]');
-  }
-
-  if (!usernameLink) return null;
-
-  const href = usernameLink.getAttribute('href');
-  if (!href || href === '/') return null;
-
-  const username = href.replace(/\//g, '');
-  if (!username || username.includes('?') || username.includes('explore')
-    || username.includes('p/') || username.length > 30) return null;
-
-  // Collect comment text by combining adjacent spans (handles emoji splitting)
-  const commentText = collectCommentText(li, username);
-
-  if (!commentText) return null;
-
-  return {
-    username: username,
-    text: commentText,
-    timestamp: extractTimestamp(li),
-    isReply: false
-  };
-}
-
-// Collect comment text by combining spans, handling emoji splitting
-function collectCommentText(li, username) {
-  // Find the comment text container - usually a span or div near the username
-  // that contains the actual comment with possibly split emoji spans
-  const spans = li.querySelectorAll('span[dir="auto"]');
-  let bestText = '';
-  let bestDepth = Infinity;
-
-  for (const span of spans) {
-    const text = span.textContent?.trim();
-    if (!text || text === username || text.length <= 1) continue;
-    if (isTimestamp(text) || isActionText(text)) continue;
-
-    // Skip spans inside nested reply lists
-    const parentLi = span.closest('li');
-    if (parentLi !== li) continue;
-
-    // Skip spans inside nested ul (reply threads)
-    const parentUl = span.closest('ul');
-    const liParentUl = li.closest('ul');
-    if (parentUl && liParentUl && parentUl !== liParentUl) {
-      // span is inside a nested ul within this li - skip
-      const isNested = li.contains(parentUl) && parentUl !== liParentUl;
-      if (isNested) continue;
-    }
-
-    const depth = getDepth(span, li);
-
-    // Prefer shallower spans (closer to the comment root)
-    if (depth < bestDepth || (depth === bestDepth && text.length > bestText.length)) {
-      // Try to get full text including emoji by going up to parent and collecting all child text
-      const fullText = collectAdjacentSpanText(span, username);
-      if (fullText.length >= text.length) {
-        bestText = fullText;
-      } else {
-        bestText = text;
-      }
-      bestDepth = depth;
-    }
-  }
-
-  // Strip username from result if it appears at start/end
-  if (bestText && username) {
-    if (bestText.toLowerCase().startsWith(username.toLowerCase())) {
-      bestText = bestText.slice(username.length).trim();
-    }
-    if (bestText.toLowerCase().endsWith(username.toLowerCase())) {
-      bestText = bestText.slice(0, -username.length).trim();
-    }
-  }
-
-  return bestText;
-}
-
-// Collect text from a span and its adjacent sibling spans (emoji splitting fix)
-function collectAdjacentSpanText(span, username) {
-  const parent = span.parentElement;
-  if (!parent) return span.textContent?.trim() || '';
-
-  // Collect text from sibling nodes, but filter out username/action/timestamp text
-  const children = parent.childNodes;
-  let combinedText = '';
-
-  for (const child of children) {
-    let childText = '';
-    if (child.nodeType === Node.TEXT_NODE) {
-      childText = child.textContent || '';
-    } else if (child.nodeType === Node.ELEMENT_NODE) {
-      const tag = child.tagName?.toLowerCase();
-      if (tag === 'img') {
-        childText = child.alt || '';
-      } else if (tag === 'span' || tag === 'a' || tag === 'br') {
-        childText = child.textContent || '';
-      }
-    }
-
-    const trimmed = childText.trim();
-    // Skip if this child's text is the username, action text, or timestamp
-    if (trimmed && trimmed === username) continue;
-    if (trimmed && isActionText(trimmed)) continue;
-    if (trimmed && isTimestamp(trimmed)) continue;
-
-    combinedText += childText;
-  }
-
-  // Normalize whitespace
-  combinedText = combinedText.replace(/\s+/g, ' ').trim();
-
-  // Sanity check: if combined text is unreasonably longer than the original span,
-  // it probably grabbed too much - fall back to original span text
-  const originalText = span.textContent?.trim() || '';
-  if (combinedText.length > originalText.length * 2.5 && originalText.length > 5) {
-    return originalText;
-  }
-
-  if (combinedText && !isActionText(combinedText) && combinedText.length > 1) {
-    return combinedText;
-  }
-
-  return originalText;
-}
-
-function collectTextFromContainer(container, username) {
-  const textSpans = container.querySelectorAll('span[dir="auto"]');
-  for (const span of textSpans) {
-    const text = span.textContent?.trim();
-    if (text && text !== username && text.length > 1 && text.length < 2000
-      && !isTimestamp(text) && !isActionText(text)) {
-      const fullText = collectAdjacentSpanText(span, username);
-      return fullText || text;
-    }
-  }
-  return null;
-}
-
-function getDepth(element, ancestor) {
-  let depth = 0;
-  let current = element;
-  while (current && current !== ancestor) {
-    depth++;
-    current = current.parentElement;
-  }
-  return depth;
 }
 
 function extractTimestamp(element) {
@@ -418,7 +470,6 @@ function isTimestamp(text) {
 
 function isActionText(text) {
   const lower = text.toLowerCase().trim();
-  // Regex patterns for action text with variable numbers
   const patterns = [
     /^(reply|balas)$/i,
     /^(like|suka|liked|disukai)$/i,
@@ -439,16 +490,14 @@ function isActionText(text) {
   return patterns.some(p => p.test(lower));
 }
 
-// Expand truncated comments ("more" / "lagi" buttons)
 async function expandTruncatedComments() {
   const root = getPostRoot();
   const buttons = root.querySelectorAll('span, button, div[role="button"]');
   let clicked = false;
   for (const btn of buttons) {
     const text = btn.textContent?.trim()?.toLowerCase() || '';
-    // Match "more" / "lagi" / "selengkapnya" but only short text (not "load more comments")
     if ((text === 'more' || text === 'lagi' || text === 'selengkapnya')
-      && btn.offsetParent !== null) { // visible
+      && btn.offsetParent !== null) {
       btn.click();
       clicked = true;
     }
@@ -496,7 +545,6 @@ async function expandReplies() {
 async function loadMoreComments() {
   const root = getPostRoot();
 
-  // Strategy 1: Click by aria-label
   const loadMoreSelectors = [
     'button[aria-label="Load more comments"]',
     'button[aria-label="Muat komentar lainnya"]',
@@ -516,7 +564,6 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 2: SVG icon buttons (circle/plus)
   const allButtons = root.querySelectorAll('button');
   for (const btn of allButtons) {
     const svg = btn.querySelector('svg');
@@ -531,7 +578,6 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 3: Text-based load more buttons
   const spans = root.querySelectorAll('span, div[role="button"]');
   for (const el of spans) {
     const text = el.textContent?.toLowerCase()?.trim() || '';
@@ -543,13 +589,10 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 4: Bidirectional scroll
   const commentContainer = findCommentContainer();
   if (commentContainer) {
-    // Scroll down first
     commentContainer.scrollTop = commentContainer.scrollHeight;
     await sleep(400);
-    // Then try a small scroll up to trigger loading older comments
     if (commentContainer.scrollTop > 200) {
       commentContainer.scrollTop = Math.max(0, commentContainer.scrollTop - 150);
       await sleep(200);
@@ -561,7 +604,6 @@ async function loadMoreComments() {
 function findCommentContainer() {
   const root = getPostRoot();
 
-  // Look for scrollable sections/roles first
   const sections = root.querySelectorAll('section, div[role="presentation"], div[role="dialog"]');
   for (const section of sections) {
     if (section.scrollHeight > section.clientHeight + 50 && section.clientHeight > 100) {
@@ -573,7 +615,6 @@ function findCommentContainer() {
     }
   }
 
-  // Fallback: scrollable ul/div with comments
   const candidates = root.querySelectorAll('ul, div');
   for (const el of candidates) {
     if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 100) {

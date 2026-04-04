@@ -57,7 +57,6 @@ async function scrapeComments(limit) {
     await expandReplies();
     await sleep(300);
     await expandReplies();
-    await expandHiddenComments();
     await expandTruncatedComments();
 
     const extracted = extractCommentsFromDOM(postOwner);
@@ -81,23 +80,13 @@ async function scrapeComments(limit) {
       previousCount = comments.length;
     }
 
-    if (noNewCount >= 6 || scrollAttempts >= maxScrollAttempts) {
+    if (noNewCount >= 8 || scrollAttempts >= maxScrollAttempts) {
       break;
     }
-
-    // Track scroll position to detect stall
-    const container = findCommentContainer();
-    const prevScrollHeight = container ? container.scrollHeight : 0;
 
     await loadMoreComments();
     scrollAttempts++;
     await waitForDOMUpdate(800);
-
-    // If scroll didn't change AND no new comments, accelerate termination
-    const newScrollHeight = container ? container.scrollHeight : 0;
-    if (container && newScrollHeight === prevScrollHeight && comments.length === previousCount && noNewCount >= 2) {
-      noNewCount++;
-    }
   }
 
   const result = limit > 0 ? comments.slice(0, limit) : comments;
@@ -629,6 +618,7 @@ async function expandReplies() {
 async function loadMoreComments() {
   const root = getPostRoot();
 
+  // Strategy 1: Click by aria-label
   const loadMoreSelectors = [
     'button[aria-label="Load more comments"]',
     'button[aria-label="Muat komentar lainnya"]',
@@ -638,110 +628,81 @@ async function loadMoreComments() {
     'button[aria-label="Lihat komentar lainnya"]'
   ];
 
-  // Strategy 1: Click load-more buttons by aria-label
   for (const selector of loadMoreSelectors) {
     const el = root.querySelector(selector);
     if (el) {
       const btn = el.closest('button') || el;
       btn.click();
-      await randomDelay(600, 1000);
+      await sleep(800);
       return;
     }
   }
 
-  // Strategy 2: Click text-based load more buttons
-  const clickables = root.querySelectorAll('span, button, div[role="button"], a');
-  for (const el of clickables) {
+  // Strategy 2: SVG icon buttons (circle/plus load-more icons)
+  const allButtons = root.querySelectorAll('button');
+  for (const btn of allButtons) {
+    const svg = btn.querySelector('svg');
+    const text = btn.textContent?.trim();
+    if (svg && (!text || text.length < 3)) {
+      const parent = btn.closest('ul') || btn.closest('section');
+      if (parent) {
+        btn.click();
+        await sleep(800);
+        return;
+      }
+    }
+  }
+
+  // Strategy 3: Text-based load more buttons
+  const spans = root.querySelectorAll('span, div[role="button"]');
+  for (const el of spans) {
     const text = el.textContent?.toLowerCase()?.trim() || '';
     if (text === 'load more' || text === 'muat lainnya' || text === 'more comments'
-      || text === 'komentar lainnya'
-      || (text.includes('+') && /^\+\s*\d+/.test(text))) {
+      || text === 'komentar lainnya') {
       el.click();
-      await randomDelay(600, 1000);
+      await sleep(800);
       return;
     }
   }
 
-  // Strategy 3: Scroll the comment container to trigger lazy loading
+  // Strategy 4: Bidirectional scroll
   const commentContainer = findCommentContainer();
   if (commentContainer) {
     commentContainer.scrollTop = commentContainer.scrollHeight;
-    await randomDelay(300, 600);
+    await sleep(400);
     if (commentContainer.scrollTop > 200) {
       commentContainer.scrollTop = Math.max(0, commentContainer.scrollTop - 150);
-      await randomDelay(150, 350);
+      await sleep(200);
       commentContainer.scrollTop = commentContainer.scrollHeight;
     }
-    return;
   }
-
-  // Strategy 4: Last resort - scroll the whole page
-  window.scrollBy(0, 500);
-  await randomDelay(300, 600);
-  window.scrollBy(0, -100);
-  await randomDelay(150, 350);
-  window.scrollBy(0, 200);
 }
 
 function findCommentContainer() {
-  // Strategy 1: Look for the scrollable container in modal view
-  // In modal, comments are in a scrollable div inside the dialog
-  const dialog = document.querySelector('div[role="dialog"]');
-  if (dialog) {
-    // Find all scrollable elements inside the dialog
-    const allDivs = dialog.querySelectorAll('div');
-    for (const div of allDivs) {
-      const style = window.getComputedStyle(div);
-      const overflowY = style.overflowY;
-      if ((overflowY === 'auto' || overflowY === 'scroll') && div.clientHeight > 50) {
-        return div;
-      }
-    }
-    // Fallback: find a div that has more content than visible
-    for (const div of allDivs) {
-      if (div.scrollHeight > div.clientHeight + 20 && div.clientHeight > 50) {
-        const hasUl = div.querySelector('ul');
-        if (hasUl) return div;
-      }
-    }
-  }
-
-  // Strategy 2: Direct page view - look for scrollable elements within article
   const root = getPostRoot();
-  const allElements = root.querySelectorAll('div, section, ul');
-  for (const el of allElements) {
-    const style = window.getComputedStyle(el);
-    const overflowY = style.overflowY;
-    if ((overflowY === 'auto' || overflowY === 'scroll') && el.clientHeight > 50) {
-      return el;
+
+  // Look for scrollable sections/roles first
+  const sections = root.querySelectorAll('section, div[role="presentation"], div[role="dialog"]');
+  for (const section of sections) {
+    if (section.scrollHeight > section.clientHeight + 50 && section.clientHeight > 100) {
+      const hasLinks = section.querySelectorAll('a[href^="/"]').length > 2;
+      const hasSpans = section.querySelectorAll('span[dir="auto"]').length > 2;
+      if (hasLinks && hasSpans) {
+        return section;
+      }
     }
   }
 
-  // Strategy 3: Find any element with more content than visible that contains comments
-  for (const el of allElements) {
-    if (el.scrollHeight > el.clientHeight + 20 && el.clientHeight > 50) {
-      const hasUl = el.querySelector('ul');
-      if (hasUl) return el;
+  // Fallback: scrollable ul/div with comments
+  const candidates = root.querySelectorAll('ul, div');
+  for (const el of candidates) {
+    if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 100) {
+      const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
+      const hasSpans = el.querySelectorAll('span[dir="auto"]').length > 2;
+      if (hasLinks && hasSpans) {
+        return el;
+      }
     }
-  }
-
-  // Strategy 4: Walk up from article element to find scrollable parent
-  let current = root;
-  while (current && current !== document.body) {
-    const style = window.getComputedStyle(current);
-    if ((style.overflowY === 'auto' || style.overflowY === 'scroll')
-      && current.clientHeight > 50) {
-      return current;
-    }
-    if (current.scrollHeight > current.clientHeight + 20 && current.clientHeight > 50) {
-      return current;
-    }
-    current = current.parentElement;
-  }
-
-  // Last resort: use the root element itself or the article's parent
-  if (root !== document) {
-    return root.parentElement || root;
   }
   return null;
 }

@@ -79,13 +79,23 @@ async function scrapeComments(limit) {
       previousCount = comments.length;
     }
 
-    if (noNewCount >= 8 || scrollAttempts >= maxScrollAttempts) {
+    if (noNewCount >= 4 || scrollAttempts >= maxScrollAttempts) {
       break;
     }
+
+    // Track scroll position to detect stall
+    const container = findCommentContainer();
+    const prevScrollHeight = container ? container.scrollHeight : 0;
 
     await loadMoreComments();
     scrollAttempts++;
     await waitForDOMUpdate(800);
+
+    // If scroll didn't change AND no new comments, accelerate termination
+    const newScrollHeight = container ? container.scrollHeight : 0;
+    if (container && newScrollHeight === prevScrollHeight && comments.length === previousCount) {
+      noNewCount += 2;
+    }
   }
 
   const result = limit > 0 ? comments.slice(0, limit) : comments;
@@ -140,6 +150,20 @@ function deduplicateFinal(comments) {
           break;
         }
       }
+    }
+  }
+
+  // Cross-user dedup: identical long text across different users is a scraping artifact
+  // (e.g., parent comment text leaking into all reply entries)
+  const textMap = new Map();
+  for (let i = 0; i < comments.length; i++) {
+    if (toRemove.has(i)) continue;
+    const normText = comments[i].text.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (normText.length <= 100) continue; // only for long text
+    if (textMap.has(normText)) {
+      toRemove.add(i); // remove later duplicate
+    } else {
+      textMap.set(normText, i);
     }
   }
 
@@ -302,32 +326,48 @@ function extractCommentText(li, username) {
   // Instagram puts comment text in span[dir="auto"] elements
   // We want the one that is the actual comment, not username/action/timestamp
   const spans = li.querySelectorAll('span[dir="auto"]');
-  let bestText = '';
+  const usernameLink = findUsernameLink(li);
 
-  for (const span of spans) {
-    // Skip spans inside nested reply lists (ul within this li)
+  // Helper: check if a span is a valid comment text candidate
+  function isValidCommentSpan(span) {
     const parentLi = span.closest('li');
-    if (parentLi !== li) continue;
+    if (parentLi !== li) return false;
 
     const text = span.textContent?.trim();
-    if (!text || text.length < 1) continue;
+    if (!text || text.length < 1) return false;
+    if (text === username) return false;
+    if (isActionText(text) || isTimestamp(text) || isNonCommentText(text)) return false;
+    return true;
+  }
 
-    // Skip if it's the username
-    if (text === username) continue;
+  // Pass 1: Find first valid span AFTER the username link (most reliable for replies)
+  let bestText = '';
+  if (usernameLink) {
+    for (const span of spans) {
+      if (!isValidCommentSpan(span)) continue;
 
-    // Skip action text, timestamps, and non-comment text (likes, etc.)
-    if (isActionText(text) || isTimestamp(text) || isNonCommentText(text)) continue;
+      // Check this span comes after the username link in DOM order
+      if (usernameLink.compareDocumentPosition(span) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        const fullText = collectSpanText(span, username, li);
+        if (fullText && !isNonCommentText(fullText)) {
+          bestText = fullText;
+          break; // Take the FIRST valid one, not the longest
+        }
+      }
+    }
+  }
 
-    // This span contains comment text - collect it with emoji support
-    const fullText = collectSpanText(span, username);
-    if (!fullText) continue;
+  // Pass 2: Fallback to longest valid span if pass 1 found nothing
+  if (!bestText) {
+    for (const span of spans) {
+      if (!isValidCommentSpan(span)) continue;
 
-    // Skip if collected text is non-comment
-    if (isNonCommentText(fullText)) continue;
+      const fullText = collectSpanText(span, username, li);
+      if (!fullText || isNonCommentText(fullText)) continue;
 
-    // Pick the longest valid text (the actual comment, not fragments)
-    if (fullText.length > bestText.length) {
-      bestText = fullText;
+      if (fullText.length > bestText.length) {
+        bestText = fullText;
+      }
     }
   }
 
@@ -348,9 +388,16 @@ function extractCommentText(li, username) {
 }
 
 // Collect text from a span and its siblings (handles emoji split across spans)
-function collectSpanText(span, username) {
+// boundaryEl: the <li> element that this span must stay within
+function collectSpanText(span, username, boundaryEl) {
   const parent = span.parentElement;
   if (!parent) return span.textContent?.trim() || '';
+
+  // Ensure parent is within the boundary <li> element
+  // If parent escaped the li, just return the span's own text
+  if (boundaryEl && !boundaryEl.contains(parent)) {
+    return span.textContent?.trim() || '';
+  }
 
   // Check if parent has multiple child nodes (emoji splitting case)
   const children = parent.childNodes;
@@ -569,7 +616,7 @@ async function loadMoreComments() {
     if (el) {
       const btn = el.closest('button') || el;
       btn.click();
-      await sleep(800);
+      await randomDelay(600, 1000);
       return;
     }
   }
@@ -582,7 +629,7 @@ async function loadMoreComments() {
       const parent = btn.closest('ul') || btn.closest('section');
       if (parent) {
         btn.click();
-        await sleep(800);
+        await randomDelay(600, 1000);
         return;
       }
     }
@@ -594,18 +641,22 @@ async function loadMoreComments() {
     if (text === 'load more' || text === 'muat lainnya' || text === 'more comments'
       || text === 'komentar lainnya') {
       el.click();
-      await sleep(800);
+      await randomDelay(600, 1000);
       return;
     }
   }
 
   const commentContainer = findCommentContainer();
   if (commentContainer) {
+    // Check if already at the bottom - don't scroll if nothing more to load
+    const distanceFromBottom = commentContainer.scrollHeight - commentContainer.scrollTop - commentContainer.clientHeight;
+    if (distanceFromBottom < 10) return;
+
     commentContainer.scrollTop = commentContainer.scrollHeight;
-    await sleep(400);
+    await randomDelay(300, 600);
     if (commentContainer.scrollTop > 200) {
       commentContainer.scrollTop = Math.max(0, commentContainer.scrollTop - 150);
-      await sleep(200);
+      await randomDelay(150, 350);
       commentContainer.scrollTop = commentContainer.scrollHeight;
     }
   }
@@ -669,4 +720,8 @@ function waitForDOMUpdate(timeout) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function randomDelay(min, max) {
+  return sleep(min + Math.floor(Math.random() * (max - min)));
 }

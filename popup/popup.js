@@ -10,6 +10,11 @@ const errorSection = document.getElementById('error-section');
 const errorText = document.getElementById('error-text');
 const resultsSection = document.getElementById('results-section');
 
+// Store results for PDF generation
+let lastAnalysis = null;
+let lastComments = [];
+let categorizedComments = { positif: [], negatif: [], netral: [] };
+
 // Load saved API key on popup open
 chrome.storage.local.get(['geminiApiKey'], (result) => {
   if (result.geminiApiKey) {
@@ -35,9 +40,19 @@ saveKeyBtn.addEventListener('click', () => {
   });
 });
 
+// Sentiment tab switching
+document.querySelectorAll('.sentiment-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.sentiment-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.comment-list-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    const tabName = tab.getAttribute('data-tab');
+    document.getElementById('comment-list-' + tabName).classList.add('active');
+  });
+});
+
 // Main scrape & analyze action
 scrapeBtn.addEventListener('click', async () => {
-  // Reset UI
   errorSection.classList.add('hidden');
   resultsSection.classList.add('hidden');
   progressSection.classList.remove('hidden');
@@ -46,7 +61,6 @@ scrapeBtn.addEventListener('click', async () => {
   const limit = parseInt(commentLimit.value, 10);
 
   try {
-    // Step 1: Scrape comments via content script
     updateProgress(10, 'Memulai scraping komentar...');
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -64,9 +78,9 @@ scrapeBtn.addEventListener('click', async () => {
       throw new Error('Tidak ada komentar yang ditemukan. Pastikan post memiliki komentar.');
     }
 
+    lastComments = comments;
     updateProgress(50, `${comments.length} komentar ditemukan. Menganalisis...`);
 
-    // Step 2: Send to background for Gemini analysis
     const analysis = await chrome.runtime.sendMessage({
       action: 'analyzeComments',
       comments: comments,
@@ -77,15 +91,22 @@ scrapeBtn.addEventListener('click', async () => {
       throw new Error(analysis.error);
     }
 
+    lastAnalysis = analysis;
     updateProgress(100, 'Selesai!');
 
-    // Step 3: Display results
-    displayResults(comments.length, analysis);
+    displayResults(comments.length, analysis, comments);
 
   } catch (err) {
     showError(err.message);
   } finally {
     scrapeBtn.disabled = false;
+  }
+});
+
+// Download PDF button
+document.getElementById('download-pdf-btn').addEventListener('click', () => {
+  if (lastAnalysis && lastComments.length > 0) {
+    downloadPDF(lastAnalysis, lastComments, categorizedComments);
   }
 });
 
@@ -116,7 +137,7 @@ function showError(message) {
   errorText.textContent = message;
 }
 
-function displayResults(count, analysis) {
+function displayResults(count, analysis, comments) {
   progressSection.classList.add('hidden');
   resultsSection.classList.remove('hidden');
 
@@ -126,7 +147,7 @@ function displayResults(count, analysis) {
   // Summary
   document.getElementById('result-summary').textContent = analysis.ringkasan || '-';
 
-  // Sentiment
+  // Sentiment bars
   const sentimentDiv = document.getElementById('result-sentiment');
   sentimentDiv.innerHTML = '';
   const sentiments = [
@@ -153,7 +174,7 @@ function displayResults(count, analysis) {
   topicsDiv.innerHTML = '';
   if (analysis.topik && analysis.topik.length > 0) {
     for (const topic of analysis.topik) {
-      topicsDiv.innerHTML += `<span class="topic-tag">${topic}</span>`;
+      topicsDiv.innerHTML += `<span class="topic-tag">${escapeHTML(topic)}</span>`;
     }
   } else {
     topicsDiv.innerHTML = '<p>Tidak ada topik terdeteksi</p>';
@@ -166,12 +187,217 @@ function displayResults(count, analysis) {
     for (const h of analysis.komentar_menarik) {
       highlightsDiv.innerHTML += `
         <div class="highlight-item">
-          <div class="username">@${h.username || 'anonim'}</div>
-          <div class="comment-text">${h.teks || h.text || ''}</div>
+          <div class="username">@${escapeHTML(h.username || 'anonim')}</div>
+          <div class="comment-text">${escapeHTML(h.teks || h.text || '')}</div>
         </div>
       `;
     }
   } else {
     highlightsDiv.innerHTML = '<p>Tidak ada komentar menarik</p>';
   }
+
+  // Categorize comments by sentiment
+  categorizedComments = { positif: [], negatif: [], netral: [] };
+
+  if (analysis.klasifikasi_komentar && analysis.klasifikasi_komentar.length > 0) {
+    for (const item of analysis.klasifikasi_komentar) {
+      const idx = item.index - 1;
+      const sentiment = item.sentimen?.toLowerCase() || 'netral';
+      const comment = comments[idx];
+      if (comment) {
+        const entry = { username: comment.username, text: comment.text };
+        if (categorizedComments[sentiment]) {
+          categorizedComments[sentiment].push(entry);
+        } else {
+          categorizedComments.netral.push(entry);
+        }
+      }
+    }
+  } else {
+    // Fallback: put all comments as netral if no classification available
+    for (const comment of comments) {
+      categorizedComments.netral.push({ username: comment.username, text: comment.text });
+    }
+  }
+
+  // Update tab badges
+  document.getElementById('count-positif').textContent = categorizedComments.positif.length;
+  document.getElementById('count-negatif').textContent = categorizedComments.negatif.length;
+  document.getElementById('count-netral').textContent = categorizedComments.netral.length;
+
+  // Render comment lists
+  renderCommentList('positif', categorizedComments.positif, 'positive');
+  renderCommentList('negatif', categorizedComments.negatif, 'negative');
+  renderCommentList('netral', categorizedComments.netral, 'neutral');
+}
+
+function renderCommentList(sentimentKey, comments, cssClass) {
+  const container = document.getElementById('comment-list-' + sentimentKey);
+  container.innerHTML = '';
+
+  if (comments.length === 0) {
+    container.innerHTML = '<p class="empty-list">Tidak ada komentar</p>';
+    return;
+  }
+
+  for (const c of comments) {
+    container.innerHTML += `
+      <div class="comment-item ${cssClass}">
+        <span class="comment-item-user">@${escapeHTML(c.username)}</span>
+        <span class="comment-item-text">${escapeHTML(c.text)}</span>
+      </div>
+    `;
+  }
+}
+
+function escapeHTML(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function downloadPDF(analysis, comments, categorized) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 15;
+  const contentWidth = pageWidth - margin * 2;
+  let y = margin;
+
+  function checkPage(needed) {
+    if (y + needed > doc.internal.pageSize.getHeight() - margin) {
+      doc.addPage();
+      y = margin;
+    }
+  }
+
+  function addTitle(text, size) {
+    checkPage(12);
+    doc.setFontSize(size || 16);
+    doc.setFont(undefined, 'bold');
+    doc.text(text, margin, y);
+    y += (size || 16) * 0.5 + 2;
+  }
+
+  function addText(text, size) {
+    doc.setFontSize(size || 11);
+    doc.setFont(undefined, 'normal');
+    const lines = doc.splitTextToSize(text, contentWidth);
+    for (const line of lines) {
+      checkPage(6);
+      doc.text(line, margin, y);
+      y += 5;
+    }
+  }
+
+  function addSeparator() {
+    checkPage(5);
+    y += 2;
+    doc.setDrawColor(200, 200, 200);
+    doc.line(margin, y, pageWidth - margin, y);
+    y += 5;
+  }
+
+  // Header
+  doc.setFontSize(20);
+  doc.setFont(undefined, 'bold');
+  doc.setTextColor(131, 58, 180); // Instagram purple
+  doc.text('Instagram Comment Analysis', margin, y);
+  y += 10;
+
+  doc.setTextColor(100, 100, 100);
+  doc.setFontSize(10);
+  doc.setFont(undefined, 'normal');
+  const now = new Date();
+  doc.text(`Generated: ${now.toLocaleDateString('id-ID')} ${now.toLocaleTimeString('id-ID')}`, margin, y);
+  y += 5;
+  doc.text(`Total comments analyzed: ${comments.length}`, margin, y);
+  y += 8;
+
+  doc.setTextColor(0, 0, 0);
+
+  // Summary
+  addSeparator();
+  addTitle('Ringkasan');
+  addText(analysis.ringkasan || '-');
+  y += 3;
+
+  // Sentiment
+  addSeparator();
+  addTitle('Sentimen');
+  const sentPct = analysis.sentimen || {};
+  addText(`Positif: ${sentPct.positif ?? 0}%  |  Negatif: ${sentPct.negatif ?? 0}%  |  Netral: ${sentPct.netral ?? 0}%`);
+  y += 3;
+
+  // Topics
+  addSeparator();
+  addTitle('Topik Utama');
+  if (analysis.topik && analysis.topik.length > 0) {
+    addText(analysis.topik.join(', '));
+  } else {
+    addText('Tidak ada topik terdeteksi');
+  }
+  y += 3;
+
+  // Highlights
+  addSeparator();
+  addTitle('Komentar Menarik');
+  if (analysis.komentar_menarik && analysis.komentar_menarik.length > 0) {
+    for (const h of analysis.komentar_menarik) {
+      checkPage(14);
+      doc.setFont(undefined, 'bold');
+      doc.setFontSize(11);
+      doc.text(`@${h.username || 'anonim'}`, margin, y);
+      y += 5;
+      doc.setFont(undefined, 'normal');
+      const txt = h.teks || h.text || '';
+      addText(txt);
+      if (h.alasan) {
+        doc.setFont(undefined, 'italic');
+        doc.setTextColor(100, 100, 100);
+        addText(`Alasan: ${h.alasan}`);
+        doc.setTextColor(0, 0, 0);
+      }
+      y += 3;
+    }
+  }
+
+  // Comment lists by sentiment
+  const sections = [
+    { key: 'positif', label: 'Komentar Positif', color: [76, 175, 80] },
+    { key: 'negatif', label: 'Komentar Negatif', color: [244, 67, 54] },
+    { key: 'netral', label: 'Komentar Netral', color: [255, 152, 0] }
+  ];
+
+  for (const section of sections) {
+    const list = categorized[section.key] || [];
+    if (list.length === 0) continue;
+
+    addSeparator();
+    doc.setTextColor(...section.color);
+    addTitle(`${section.label} (${list.length})`, 14);
+    doc.setTextColor(0, 0, 0);
+
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
+      checkPage(10);
+      doc.setFontSize(10);
+      doc.setFont(undefined, 'bold');
+      doc.text(`@${c.username}`, margin, y);
+      y += 4;
+      doc.setFont(undefined, 'normal');
+      const lines = doc.splitTextToSize(c.text, contentWidth);
+      for (const line of lines) {
+        checkPage(5);
+        doc.text(line, margin, y);
+        y += 4;
+      }
+      y += 2;
+    }
+  }
+
+  // Save
+  const timestamp = now.toISOString().slice(0, 19).replace(/[T:]/g, '-');
+  doc.save(`ig-analysis-${timestamp}.pdf`);
 }

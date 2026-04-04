@@ -108,14 +108,19 @@ function renderReport(data) {
     + '<div class="cat-header neutral">Netral &mdash; ' + categorized.netral.length + ' komentar</div>'
     + buildTable(categorized.netral, '#ff9800') + '</div>'
 
-    // Print button
+    // Print button (no inline onclick - CSP blocks it in extensions)
     + '<div class="print-btn-wrap no-print">'
-    + '<button class="print-btn" onclick="window.print()">Cetak / Save as PDF</button></div>';
+    + '<button class="print-btn" id="print-btn">Cetak / Save as PDF</button></div>';
 
   document.getElementById('loading').style.display = 'none';
   const reportDiv = document.getElementById('report');
   reportDiv.innerHTML = html;
   reportDiv.style.display = 'block';
+
+  // Attach print handler via JS (not inline onclick)
+  document.getElementById('print-btn').addEventListener('click', () => {
+    window.print();
+  });
 }
 
 // Fetch data from background service worker

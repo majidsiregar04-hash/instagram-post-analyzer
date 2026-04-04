@@ -10,7 +10,7 @@ const errorSection = document.getElementById('error-section');
 const errorText = document.getElementById('error-text');
 const resultsSection = document.getElementById('results-section');
 
-// Store results for PDF generation
+// Store results for print page
 let lastAnalysis = null;
 let lastComments = [];
 let categorizedComments = { positif: [], negatif: [], netral: [] };
@@ -103,10 +103,10 @@ scrapeBtn.addEventListener('click', async () => {
   }
 });
 
-// Download PDF button
-document.getElementById('download-pdf-btn').addEventListener('click', () => {
+// Print / Save as PDF button
+document.getElementById('print-btn').addEventListener('click', () => {
   if (lastAnalysis && lastComments.length > 0) {
-    downloadPDF(lastAnalysis, lastComments, categorizedComments);
+    openPrintPage(lastAnalysis, lastComments, categorizedComments);
   }
 });
 
@@ -141,10 +141,7 @@ function displayResults(count, analysis, comments) {
   progressSection.classList.add('hidden');
   resultsSection.classList.remove('hidden');
 
-  // Comment count badge
   document.getElementById('comment-count').textContent = count + ' komentar';
-
-  // Summary
   document.getElementById('result-summary').textContent = analysis.ringkasan || '-';
 
   // Sentiment bars
@@ -214,7 +211,6 @@ function displayResults(count, analysis, comments) {
       }
     }
   } else {
-    // Fallback: put all comments as netral if no classification available
     for (const comment of comments) {
       categorizedComments.netral.push({ username: comment.username, text: comment.text });
     }
@@ -256,148 +252,372 @@ function escapeHTML(str) {
   return div.innerHTML;
 }
 
-function downloadPDF(analysis, comments, categorized) {
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const margin = 15;
-  const contentWidth = pageWidth - margin * 2;
-  let y = margin;
-
-  function checkPage(needed) {
-    if (y + needed > doc.internal.pageSize.getHeight() - margin) {
-      doc.addPage();
-      y = margin;
-    }
-  }
-
-  function addTitle(text, size) {
-    checkPage(12);
-    doc.setFontSize(size || 16);
-    doc.setFont(undefined, 'bold');
-    doc.text(text, margin, y);
-    y += (size || 16) * 0.5 + 2;
-  }
-
-  function addText(text, size) {
-    doc.setFontSize(size || 11);
-    doc.setFont(undefined, 'normal');
-    const lines = doc.splitTextToSize(text, contentWidth);
-    for (const line of lines) {
-      checkPage(6);
-      doc.text(line, margin, y);
-      y += 5;
-    }
-  }
-
-  function addSeparator() {
-    checkPage(5);
-    y += 2;
-    doc.setDrawColor(200, 200, 200);
-    doc.line(margin, y, pageWidth - margin, y);
-    y += 5;
-  }
-
-  // Header
-  doc.setFontSize(20);
-  doc.setFont(undefined, 'bold');
-  doc.setTextColor(131, 58, 180); // Instagram purple
-  doc.text('Instagram Comment Analysis', margin, y);
-  y += 10;
-
-  doc.setTextColor(100, 100, 100);
-  doc.setFontSize(10);
-  doc.setFont(undefined, 'normal');
+// Generate a print-friendly HTML page and open it in a new tab
+function openPrintPage(analysis, comments, categorized) {
   const now = new Date();
-  doc.text(`Generated: ${now.toLocaleDateString('id-ID')} ${now.toLocaleTimeString('id-ID')}`, margin, y);
-  y += 5;
-  doc.text(`Total comments analyzed: ${comments.length}`, margin, y);
-  y += 8;
-
-  doc.setTextColor(0, 0, 0);
-
-  // Summary
-  addSeparator();
-  addTitle('Ringkasan');
-  addText(analysis.ringkasan || '-');
-  y += 3;
-
-  // Sentiment
-  addSeparator();
-  addTitle('Sentimen');
+  const dateStr = now.toLocaleDateString('id-ID', { year: 'numeric', month: 'long', day: 'numeric' });
+  const timeStr = now.toLocaleTimeString('id-ID');
   const sentPct = analysis.sentimen || {};
-  addText(`Positif: ${sentPct.positif ?? 0}%  |  Negatif: ${sentPct.negatif ?? 0}%  |  Netral: ${sentPct.netral ?? 0}%`);
-  y += 3;
 
-  // Topics
-  addSeparator();
-  addTitle('Topik Utama');
-  if (analysis.topik && analysis.topik.length > 0) {
-    addText(analysis.topik.join(', '));
-  } else {
-    addText('Tidak ada topik terdeteksi');
-  }
-  y += 3;
-
-  // Highlights
-  addSeparator();
-  addTitle('Komentar Menarik');
+  // Build highlights HTML
+  let highlightsHTML = '';
   if (analysis.komentar_menarik && analysis.komentar_menarik.length > 0) {
     for (const h of analysis.komentar_menarik) {
-      checkPage(14);
-      doc.setFont(undefined, 'bold');
-      doc.setFontSize(11);
-      doc.text(`@${h.username || 'anonim'}`, margin, y);
-      y += 5;
-      doc.setFont(undefined, 'normal');
-      const txt = h.teks || h.text || '';
-      addText(txt);
-      if (h.alasan) {
-        doc.setFont(undefined, 'italic');
-        doc.setTextColor(100, 100, 100);
-        addText(`Alasan: ${h.alasan}`);
-        doc.setTextColor(0, 0, 0);
-      }
-      y += 3;
+      const username = escapeHTMLStr(h.username || 'anonim');
+      const teks = escapeHTMLStr(h.teks || h.text || '');
+      const alasan = h.alasan ? `<div class="reason">${escapeHTMLStr(h.alasan)}</div>` : '';
+      highlightsHTML += `
+        <div class="highlight-card">
+          <div class="highlight-user">@${username}</div>
+          <div class="highlight-text">${teks}</div>
+          ${alasan}
+        </div>`;
     }
+  } else {
+    highlightsHTML = '<p class="muted">Tidak ada komentar menarik</p>';
   }
 
-  // Comment lists by sentiment
-  const sections = [
-    { key: 'positif', label: 'Komentar Positif', color: [76, 175, 80] },
-    { key: 'negatif', label: 'Komentar Negatif', color: [244, 67, 54] },
-    { key: 'netral', label: 'Komentar Netral', color: [255, 152, 0] }
-  ];
+  // Build topics HTML
+  let topicsHTML = '';
+  if (analysis.topik && analysis.topik.length > 0) {
+    topicsHTML = analysis.topik.map(t => `<span class="tag">${escapeHTMLStr(t)}</span>`).join('');
+  } else {
+    topicsHTML = '<p class="muted">Tidak ada topik terdeteksi</p>';
+  }
 
-  for (const section of sections) {
-    const list = categorized[section.key] || [];
-    if (list.length === 0) continue;
-
-    addSeparator();
-    doc.setTextColor(...section.color);
-    addTitle(`${section.label} (${list.length})`, 14);
-    doc.setTextColor(0, 0, 0);
-
+  // Build comment tables per sentiment
+  function buildCommentTable(list, colorClass) {
+    if (list.length === 0) return '<p class="muted">Tidak ada komentar dalam kategori ini.</p>';
+    let rows = '';
     for (let i = 0; i < list.length; i++) {
-      const c = list[i];
-      checkPage(10);
-      doc.setFontSize(10);
-      doc.setFont(undefined, 'bold');
-      doc.text(`@${c.username}`, margin, y);
-      y += 4;
-      doc.setFont(undefined, 'normal');
-      const lines = doc.splitTextToSize(c.text, contentWidth);
-      for (const line of lines) {
-        checkPage(5);
-        doc.text(line, margin, y);
-        y += 4;
-      }
-      y += 2;
+      rows += `<tr>
+        <td class="col-num">${i + 1}</td>
+        <td class="col-user">@${escapeHTMLStr(list[i].username)}</td>
+        <td class="col-text">${escapeHTMLStr(list[i].text)}</td>
+      </tr>`;
     }
+    return `<table class="comment-table ${colorClass}">
+      <thead><tr><th class="col-num">No</th><th class="col-user">User</th><th class="col-text">Komentar</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
   }
 
-  // Save
-  const timestamp = now.toISOString().slice(0, 19).replace(/[T:]/g, '-');
-  doc.save(`ig-analysis-${timestamp}.pdf`);
+  const positifTable = buildCommentTable(categorized.positif, 'tbl-positive');
+  const negatifTable = buildCommentTable(categorized.negatif, 'tbl-negative');
+  const netralTable = buildCommentTable(categorized.netral, 'tbl-neutral');
+
+  const html = `<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Instagram Comment Analysis Report</title>
+<style>
+  @page {
+    size: A4;
+    margin: 15mm 12mm;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    color: #1a1a1a;
+    font-size: 11pt;
+    line-height: 1.5;
+    background: #fff;
+    padding: 20px 30px;
+  }
+
+  /* Header */
+  .report-header {
+    text-align: center;
+    border-bottom: 3px solid #833ab4;
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+  }
+  .report-header h1 {
+    font-size: 22pt;
+    font-weight: 700;
+    background: linear-gradient(135deg, #833ab4, #fd1d1d, #fcb045);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 6px;
+  }
+  .report-header .meta {
+    font-size: 10pt;
+    color: #666;
+  }
+  .report-header .meta strong { color: #333; }
+
+  /* Sections */
+  .section {
+    margin-bottom: 20px;
+    break-inside: avoid;
+  }
+  .section-title {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #333;
+    border-bottom: 2px solid #e0e0e0;
+    padding-bottom: 4px;
+    margin-bottom: 10px;
+  }
+
+  /* Summary box */
+  .summary-box {
+    background: #f8f8fa;
+    border-left: 4px solid #833ab4;
+    padding: 12px 16px;
+    border-radius: 4px;
+    font-size: 11pt;
+    color: #333;
+  }
+
+  /* Sentiment */
+  .sentiment-grid {
+    display: flex;
+    gap: 12px;
+    margin-top: 8px;
+  }
+  .sentiment-card {
+    flex: 1;
+    text-align: center;
+    padding: 12px 8px;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+  }
+  .sentiment-card .pct {
+    font-size: 24pt;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+  .sentiment-card .lbl {
+    font-size: 10pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 2px;
+  }
+  .sentiment-card.positive { border-color: #4caf50; }
+  .sentiment-card.positive .pct { color: #2e7d32; }
+  .sentiment-card.positive .lbl { color: #4caf50; }
+  .sentiment-card.negative { border-color: #f44336; }
+  .sentiment-card.negative .pct { color: #c62828; }
+  .sentiment-card.negative .lbl { color: #f44336; }
+  .sentiment-card.neutral { border-color: #ff9800; }
+  .sentiment-card.neutral .pct { color: #e65100; }
+  .sentiment-card.neutral .lbl { color: #ff9800; }
+
+  /* Bar visual */
+  .sentiment-bar-container {
+    display: flex;
+    height: 12px;
+    border-radius: 6px;
+    overflow: hidden;
+    margin-top: 10px;
+    background: #eee;
+  }
+  .bar-pos { background: #4caf50; }
+  .bar-neg { background: #f44336; }
+  .bar-neu { background: #ff9800; }
+
+  /* Topics */
+  .tags { margin-top: 6px; }
+  .tag {
+    display: inline-block;
+    background: #f0f0f5;
+    border: 1px solid #d0d0d8;
+    border-radius: 16px;
+    padding: 4px 14px;
+    margin: 3px 4px 3px 0;
+    font-size: 10pt;
+    color: #444;
+  }
+
+  /* Highlights */
+  .highlight-card {
+    border-left: 4px solid #833ab4;
+    padding: 8px 14px;
+    margin-bottom: 10px;
+    background: #faf8fc;
+    border-radius: 0 4px 4px 0;
+  }
+  .highlight-user {
+    font-weight: 700;
+    color: #833ab4;
+    font-size: 10pt;
+  }
+  .highlight-text {
+    color: #333;
+    margin-top: 2px;
+    font-size: 10.5pt;
+  }
+  .reason {
+    color: #888;
+    font-style: italic;
+    font-size: 9.5pt;
+    margin-top: 4px;
+  }
+
+  /* Comment tables */
+  .comment-section-header {
+    font-size: 12pt;
+    font-weight: 700;
+    padding: 6px 10px;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    color: #fff;
+  }
+  .comment-section-header.positive-hdr { background: #4caf50; }
+  .comment-section-header.negative-hdr { background: #f44336; }
+  .comment-section-header.neutral-hdr { background: #ff9800; }
+
+  .comment-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 16px;
+    font-size: 9.5pt;
+  }
+  .comment-table thead th {
+    background: #f5f5f5;
+    padding: 6px 8px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 2px solid #ddd;
+    font-size: 9pt;
+    color: #555;
+  }
+  .comment-table tbody tr {
+    border-bottom: 1px solid #eee;
+  }
+  .comment-table tbody tr:nth-child(even) {
+    background: #fafafa;
+  }
+  .comment-table td {
+    padding: 5px 8px;
+    vertical-align: top;
+  }
+  .col-num { width: 35px; text-align: center; color: #999; }
+  .col-user { width: 110px; font-weight: 600; color: #833ab4; white-space: nowrap; }
+  .col-text { color: #333; }
+
+  .tbl-positive thead th { border-bottom-color: #4caf50; }
+  .tbl-negative thead th { border-bottom-color: #f44336; }
+  .tbl-neutral thead th { border-bottom-color: #ff9800; }
+
+  .muted { color: #999; font-style: italic; }
+
+  /* Print button */
+  .no-print { text-align: center; margin: 20px 0; }
+  .print-btn {
+    padding: 10px 32px;
+    font-size: 13pt;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #833ab4, #fd1d1d, #fcb045);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .print-btn:hover { opacity: 0.9; }
+
+  @media print {
+    body { padding: 0; }
+    .no-print { display: none !important; }
+    .section { break-inside: avoid; }
+    .comment-table tr { break-inside: avoid; }
+    .highlight-card { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<div class="report-header">
+  <h1>Instagram Comment Analysis</h1>
+  <div class="meta">
+    <strong>${dateStr}</strong> &nbsp;|&nbsp; ${timeStr} &nbsp;|&nbsp; <strong>${comments.length}</strong> komentar dianalisis
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Ringkasan</div>
+  <div class="summary-box">${escapeHTMLStr(analysis.ringkasan || '-')}</div>
+</div>
+
+<div class="section">
+  <div class="section-title">Sentimen</div>
+  <div class="sentiment-grid">
+    <div class="sentiment-card positive">
+      <div class="pct">${sentPct.positif ?? 0}%</div>
+      <div class="lbl">Positif</div>
+    </div>
+    <div class="sentiment-card negative">
+      <div class="pct">${sentPct.negatif ?? 0}%</div>
+      <div class="lbl">Negatif</div>
+    </div>
+    <div class="sentiment-card neutral">
+      <div class="pct">${sentPct.netral ?? 0}%</div>
+      <div class="lbl">Netral</div>
+    </div>
+  </div>
+  <div class="sentiment-bar-container">
+    <div class="bar-pos" style="width: ${sentPct.positif ?? 0}%"></div>
+    <div class="bar-neg" style="width: ${sentPct.negatif ?? 0}%"></div>
+    <div class="bar-neu" style="width: ${sentPct.netral ?? 0}%"></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Topik Utama</div>
+  <div class="tags">${topicsHTML}</div>
+</div>
+
+<div class="section">
+  <div class="section-title">Komentar Menarik</div>
+  ${highlightsHTML}
+</div>
+
+<div class="section">
+  <div class="section-title">Komentar Positif (${categorized.positif.length})</div>
+  <div class="comment-section-header positive-hdr">Positif &mdash; ${categorized.positif.length} komentar</div>
+  ${positifTable}
+</div>
+
+<div class="section">
+  <div class="section-title">Komentar Negatif (${categorized.negatif.length})</div>
+  <div class="comment-section-header negative-hdr">Negatif &mdash; ${categorized.negatif.length} komentar</div>
+  ${negatifTable}
+</div>
+
+<div class="section">
+  <div class="section-title">Komentar Netral (${categorized.netral.length})</div>
+  <div class="comment-section-header neutral-hdr">Netral &mdash; ${categorized.netral.length} komentar</div>
+  ${netralTable}
+</div>
+
+<div class="no-print">
+  <button class="print-btn" onclick="window.print()">Cetak / Save as PDF</button>
+</div>
+
+<script>
+  window.onload = function() {
+    setTimeout(function() { window.print(); }, 500);
+  };
+</script>
+</body>
+</html>`;
+
+  const blob = new Blob([html], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  chrome.tabs.create({ url: url });
+}
+
+// Escape HTML for use in template strings (not DOM-based)
+function escapeHTMLStr(str) {
+  if (!str) return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

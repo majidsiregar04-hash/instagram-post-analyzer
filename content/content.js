@@ -41,6 +41,7 @@ function getPostOwnerUsername() {
 async function scrapeComments(limit) {
   await expandTruncatedComments();
   await clickViewAllComments();
+  await expandHiddenComments();
   await sleep(1000);
 
   const comments = [];
@@ -56,6 +57,7 @@ async function scrapeComments(limit) {
     await expandReplies();
     await sleep(300);
     await expandReplies();
+    await expandHiddenComments();
     await expandTruncatedComments();
 
     const extracted = extractCommentsFromDOM(postOwner);
@@ -579,6 +581,31 @@ async function clickViewAllComments() {
     }
   }
   return false;
+}
+
+// Click "View hidden comments" / "Lihat komentar tersembunyi" button
+async function expandHiddenComments() {
+  const root = getPostRoot();
+  const buttons = root.querySelectorAll('span, button, div[role="button"], a');
+  let clicked = false;
+  for (const btn of buttons) {
+    const text = btn.textContent?.toLowerCase()?.trim() || '';
+    if ((/view\s+hidden\s+comment/i.test(text)
+      || /lihat\s+komentar\s+tersembunyi/i.test(text)
+      || /hidden\s+comment/i.test(text)
+      || /komentar\s+tersembunyi/i.test(text)
+      || /view\s+hidden\s+repl/i.test(text)
+      || /lihat\s+balasan\s+tersembunyi/i.test(text))
+      && !/hide|sembunyikan/i.test(text)
+      && btn.offsetParent !== null) {
+      btn.click();
+      clicked = true;
+      await randomDelay(600, 1000);
+    }
+  }
+  if (clicked) {
+    await sleep(800);
+  }
 }
 
 async function expandReplies() {

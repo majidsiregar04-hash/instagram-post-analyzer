@@ -5,31 +5,68 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     scrapeComments(request.limit || 0)
       .then((comments) => sendResponse({ comments }))
       .catch((err) => sendResponse({ error: err.message }));
-    return true; // keep message channel open for async response
+    return true;
   }
 });
 
+// Helper: find the correct root element (handles modal view vs direct page)
+function getPostRoot() {
+  // Modal view (post opened from feed/explore)
+  const dialog = document.querySelector('div[role="dialog"] article');
+  if (dialog) return dialog;
+  // Direct page view
+  const article = document.querySelector('article[role="presentation"]')
+    || document.querySelector('article');
+  return article || document;
+}
+
+// Detect the post owner username from the article header
+function getPostOwnerUsername() {
+  const root = getPostRoot();
+  // The first username link in the header area is typically the post owner
+  const header = root.querySelector('header');
+  if (header) {
+    const link = header.querySelector('a[href^="/"]');
+    if (link) {
+      const href = link.getAttribute('href');
+      if (href && href !== '/') {
+        return href.replace(/\//g, '');
+      }
+    }
+  }
+  return null;
+}
+
 async function scrapeComments(limit) {
-  // Try to expand all comments first
+  // Expand truncated comments first
+  await expandTruncatedComments();
+
+  // Try to expand all comments
   await clickViewAllComments();
   await sleep(1000);
 
   const comments = [];
   const seenTexts = new Set();
   let scrollAttempts = 0;
-  const maxScrollAttempts = limit === 0 ? 150 : Math.ceil(limit / 10) + 15;
+  const maxScrollAttempts = limit === 0 ? 200 : Math.ceil(limit / 10) + 20;
   let previousCount = 0;
   let noNewCount = 0;
+  const postOwner = getPostOwnerUsername();
 
   while (true) {
-    // Try to click "View all comments" again in case it reappeared
+    // Try to click "View all comments" again
     await clickViewAllComments();
 
-    // Expand reply threads
+    // Expand reply threads (with retry)
     await expandReplies();
+    await sleep(300);
+    await expandReplies(); // retry for newly appeared buttons
+
+    // Expand truncated comments
+    await expandTruncatedComments();
 
     // Extract comments currently in the DOM
-    const extracted = extractCommentsFromDOM();
+    const extracted = extractCommentsFromDOM(postOwner);
 
     for (const comment of extracted) {
       const key = comment.username + '::' + comment.text;
@@ -52,8 +89,8 @@ async function scrapeComments(limit) {
       previousCount = comments.length;
     }
 
-    // Stop if no new comments after 7 consecutive scroll attempts
-    if (noNewCount >= 7 || scrollAttempts >= maxScrollAttempts) {
+    // Stop if no new comments after 8 consecutive scroll attempts
+    if (noNewCount >= 8 || scrollAttempts >= maxScrollAttempts) {
       break;
     }
 
@@ -61,33 +98,35 @@ async function scrapeComments(limit) {
     await loadMoreComments();
     scrollAttempts++;
 
-    // Wait for DOM to update with adaptive timing
+    // Wait for DOM to update
     await waitForDOMUpdate(800);
   }
 
   return limit > 0 ? comments.slice(0, limit) : comments;
 }
 
-function extractCommentsFromDOM() {
+function extractCommentsFromDOM(postOwner) {
   const comments = [];
-
-  // Scope to article element to avoid picking up navigation/sidebar
-  const article = document.querySelector('article');
-  if (!article) {
-    // Fallback: try broader search
-    return extractCommentsFallback();
-  }
+  const root = getPostRoot();
 
   // Strategy 1: Find comment lists within the article
-  const commentLists = article.querySelectorAll('ul');
+  const commentLists = root.querySelectorAll('ul');
 
   for (const ul of commentLists) {
     const items = ul.querySelectorAll(':scope > li');
     if (items.length === 0) continue;
 
+    let isFirst = true;
     for (const li of items) {
       const comment = parseCommentElement(li);
       if (comment) {
+        // Skip caption (first comment from post owner)
+        if (isFirst && postOwner && comment.username === postOwner) {
+          comment.isCaption = true;
+          isFirst = false;
+          continue;
+        }
+        isFirst = false;
         comments.push(comment);
       }
 
@@ -108,18 +147,17 @@ function extractCommentsFromDOM() {
 
   // Strategy 2: If strategy 1 found nothing, try fallback
   if (comments.length === 0) {
-    return extractCommentsFallback();
+    return extractCommentsFallback(postOwner);
   }
 
   return comments;
 }
 
-function extractCommentsFallback() {
+function extractCommentsFallback(postOwner) {
   const comments = [];
-  const article = document.querySelector('article') || document;
+  const root = getPostRoot();
 
-  // Look for username links paired with comment text
-  const allLinks = article.querySelectorAll('a[href^="/"]');
+  const allLinks = root.querySelectorAll('a[href^="/"]');
   for (const link of allLinks) {
     const href = link.getAttribute('href');
     if (!href || href === '/' || href.includes('/p/') || href.includes('/reel/')
@@ -127,27 +165,22 @@ function extractCommentsFallback() {
 
     const username = href.replace(/\//g, '');
     if (!username || username.includes('?') || username.length > 30) continue;
+    if (username === postOwner) continue; // skip post owner in fallback
 
-    // Find closest comment container
     const container = link.closest('div[role="button"]')?.parentElement
       || link.closest('li')
       || link.parentElement?.parentElement?.parentElement;
 
     if (!container) continue;
 
-    const textSpans = container.querySelectorAll('span[dir="auto"]');
-    for (const span of textSpans) {
-      const text = span.textContent?.trim();
-      if (text && text !== username && text.length > 1 && text.length < 2000
-        && !isTimestamp(text) && !isActionText(text)) {
-        comments.push({
-          username: username,
-          text: text,
-          timestamp: extractTimestamp(container),
-          isReply: false
-        });
-        break;
-      }
+    const text = collectTextFromContainer(container, username);
+    if (text) {
+      comments.push({
+        username: username,
+        text: text,
+        timestamp: extractTimestamp(container),
+        isReply: false
+      });
     }
   }
 
@@ -167,7 +200,6 @@ function parseCommentElement(li) {
     break;
   }
 
-  // Fallback: any link with href
   if (!usernameLink) {
     usernameLink = li.querySelector('a[href^="/"]');
   }
@@ -181,29 +213,8 @@ function parseCommentElement(li) {
   if (!username || username.includes('?') || username.includes('explore')
     || username.includes('p/') || username.length > 30) return null;
 
-  // Find comment text - look for span elements with actual text content
-  const spans = li.querySelectorAll('span[dir="auto"]');
-  let commentText = '';
-  let bestSpan = null;
-
-  for (const span of spans) {
-    const text = span.textContent?.trim();
-    if (!text || text === username || text.length <= 1) continue;
-    if (isTimestamp(text) || isActionText(text)) continue;
-
-    // Skip spans that are inside nested reply lists (sub-comments)
-    if (span.closest('ul') !== li.closest('ul') && span.closest('li') !== li) continue;
-
-    // Prefer the first substantial span that's directly in the comment area
-    // (not nested deep in action buttons, etc.)
-    const depth = getDepth(span, li);
-    if (!bestSpan || depth < getDepth(bestSpan, li)) {
-      if (text.length > commentText.length || depth < getDepth(bestSpan, li)) {
-        commentText = text;
-        bestSpan = span;
-      }
-    }
-  }
+  // Collect comment text by combining adjacent spans (handles emoji splitting)
+  const commentText = collectCommentText(li, username);
 
   if (!commentText) return null;
 
@@ -213,6 +224,100 @@ function parseCommentElement(li) {
     timestamp: extractTimestamp(li),
     isReply: false
   };
+}
+
+// Collect comment text by combining spans, handling emoji splitting
+function collectCommentText(li, username) {
+  // Find the comment text container - usually a span or div near the username
+  // that contains the actual comment with possibly split emoji spans
+  const spans = li.querySelectorAll('span[dir="auto"]');
+  let bestText = '';
+  let bestDepth = Infinity;
+
+  for (const span of spans) {
+    const text = span.textContent?.trim();
+    if (!text || text === username || text.length <= 1) continue;
+    if (isTimestamp(text) || isActionText(text)) continue;
+
+    // Skip spans inside nested reply lists
+    const parentLi = span.closest('li');
+    if (parentLi !== li) continue;
+
+    // Skip spans inside nested ul (reply threads)
+    const parentUl = span.closest('ul');
+    const liParentUl = li.closest('ul');
+    if (parentUl && liParentUl && parentUl !== liParentUl) {
+      // span is inside a nested ul within this li - skip
+      const isNested = li.contains(parentUl) && parentUl !== liParentUl;
+      if (isNested) continue;
+    }
+
+    const depth = getDepth(span, li);
+
+    // Prefer shallower spans (closer to the comment root)
+    if (depth < bestDepth || (depth === bestDepth && text.length > bestText.length)) {
+      // Try to get full text including emoji by going up to parent and collecting all child text
+      const fullText = collectAdjacentSpanText(span);
+      if (fullText.length >= text.length) {
+        bestText = fullText;
+      } else {
+        bestText = text;
+      }
+      bestDepth = depth;
+    }
+  }
+
+  return bestText;
+}
+
+// Collect text from a span and its adjacent sibling spans (emoji splitting fix)
+function collectAdjacentSpanText(span) {
+  const parent = span.parentElement;
+  if (!parent) return span.textContent?.trim() || '';
+
+  // If parent has multiple child spans, concatenate them all
+  const children = parent.childNodes;
+  let combinedText = '';
+  let foundTarget = false;
+
+  for (const child of children) {
+    if (child === span) foundTarget = true;
+    if (child.nodeType === Node.TEXT_NODE) {
+      combinedText += child.textContent;
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      const tag = child.tagName?.toLowerCase();
+      // Include spans and inline elements, skip block elements
+      if (tag === 'span' || tag === 'a' || tag === 'br' || tag === 'img') {
+        if (tag === 'img') {
+          combinedText += child.alt || '';
+        } else {
+          combinedText += child.textContent || '';
+        }
+      }
+    }
+  }
+
+  combinedText = combinedText.trim();
+
+  // Only return combined text if it's meaningful and not just action text
+  if (combinedText && !isActionText(combinedText) && combinedText.length > 1) {
+    return combinedText;
+  }
+
+  return span.textContent?.trim() || '';
+}
+
+function collectTextFromContainer(container, username) {
+  const textSpans = container.querySelectorAll('span[dir="auto"]');
+  for (const span of textSpans) {
+    const text = span.textContent?.trim();
+    if (text && text !== username && text.length > 1 && text.length < 2000
+      && !isTimestamp(text) && !isActionText(text)) {
+      const fullText = collectAdjacentSpanText(span);
+      return fullText || text;
+    }
+  }
+  return null;
 }
 
 function getDepth(element, ancestor) {
@@ -234,31 +339,63 @@ function extractTimestamp(element) {
 }
 
 function isTimestamp(text) {
+  const t = text.trim();
   const patterns = [
     /^\d+[smhd]$/,
-    /^\d+ (jam|menit|hari|minggu|bulan|tahun)/i,
-    /^\d+ (hour|minute|day|week|month|year)/i,
-    /^(just now|baru saja)/i,
-    /^\d+[wW]$/
+    /^\d+[wW]$/,
+    /^\d+\s*(jam|menit|detik|hari|minggu|bulan|tahun)\s*(yang\s+lalu|lalu)?$/i,
+    /^\d+\s*(hour|minute|second|day|week|month|year)s?\s*ago$/i,
+    /^(just now|baru saja)$/i,
+    /^\d{1,2}\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i
   ];
-  return patterns.some(p => p.test(text.trim()));
+  return patterns.some(p => p.test(t));
 }
 
 function isActionText(text) {
   const lower = text.toLowerCase().trim();
-  const actions = [
-    'reply', 'balas', 'like', 'suka', 'liked', 'disukai',
-    'view replies', 'lihat balasan', 'hide replies', 'sembunyikan balasan',
-    'view all', 'lihat semua', 'load more', 'muat lebih',
-    'see translation', 'lihat terjemahan', 'translate', 'terjemahkan',
-    'report', 'laporkan', 'delete', 'hapus', 'edited', 'diedit'
+  // Regex patterns for action text with variable numbers
+  const patterns = [
+    /^(reply|balas)$/i,
+    /^(like|suka|liked|disukai)$/i,
+    /^view\s+(all\s+)?\d*\s*(replies|comments)/i,
+    /^lihat\s+(semua\s+)?\d*\s*(balasan|komentar)/i,
+    /^hide\s+(all\s+)?\d*\s*(replies|comments)/i,
+    /^sembunyikan\s+(semua\s+)?\d*\s*(balasan|komentar)/i,
+    /^(see\s+translation|lihat\s+terjemahan)$/i,
+    /^(translate|terjemahkan)$/i,
+    /^(report|laporkan)$/i,
+    /^(delete|hapus)$/i,
+    /^(edited|diedit)$/i,
+    /^(load\s+more|muat\s+lebih|muat\s+lainnya)$/i,
+    /^(more|lagi|selengkapnya)$/i,
+    /^\d+\s*(likes?|suka)$/i,
+    /^(send|kirim)$/i
   ];
-  return actions.some(a => lower === a || lower.startsWith(a));
+  return patterns.some(p => p.test(lower));
+}
+
+// Expand truncated comments ("more" / "lagi" buttons)
+async function expandTruncatedComments() {
+  const root = getPostRoot();
+  const buttons = root.querySelectorAll('span, button, div[role="button"]');
+  let clicked = false;
+  for (const btn of buttons) {
+    const text = btn.textContent?.trim()?.toLowerCase() || '';
+    // Match "more" / "lagi" / "selengkapnya" but only short text (not "load more comments")
+    if ((text === 'more' || text === 'lagi' || text === 'selengkapnya')
+      && btn.offsetParent !== null) { // visible
+      btn.click();
+      clicked = true;
+    }
+  }
+  if (clicked) {
+    await sleep(300);
+  }
 }
 
 async function clickViewAllComments() {
-  const article = document.querySelector('article') || document;
-  const buttons = article.querySelectorAll('span, a, button, div[role="button"]');
+  const root = getPostRoot();
+  const buttons = root.querySelectorAll('span, a, button, div[role="button"]');
   for (const btn of buttons) {
     const text = btn.textContent?.toLowerCase()?.trim() || '';
     if ((text.includes('view all') && text.includes('comment'))
@@ -274,29 +411,27 @@ async function clickViewAllComments() {
 }
 
 async function expandReplies() {
-  const article = document.querySelector('article') || document;
-  // Find "View replies (X)" / "Lihat balasan (X)" buttons
-  const buttons = article.querySelectorAll('span, button, div[role="button"]');
+  const root = getPostRoot();
+  const buttons = root.querySelectorAll('span, button, div[role="button"]');
   let clicked = false;
   for (const btn of buttons) {
     const text = btn.textContent?.toLowerCase()?.trim() || '';
-    if ((text.includes('view replies') || text.includes('lihat balasan')
-      || text.includes('view') && text.includes('repl'))
-      && !text.includes('hide') && !text.includes('sembunyikan')) {
+    if ((/view\s+(\d+\s+)?repl/i.test(text) || /lihat\s+(\d+\s+)?balasan/i.test(text))
+      && !/hide|sembunyikan/i.test(text)) {
       btn.click();
       clicked = true;
-      await sleep(500);
+      await sleep(400);
     }
   }
   if (clicked) {
-    await sleep(1000);
+    await sleep(800);
   }
 }
 
 async function loadMoreComments() {
-  const article = document.querySelector('article') || document;
+  const root = getPostRoot();
 
-  // Strategy 1: Click "Load more comments" button by aria-label
+  // Strategy 1: Click by aria-label
   const loadMoreSelectors = [
     'button[aria-label="Load more comments"]',
     'button[aria-label="Muat komentar lainnya"]',
@@ -307,7 +442,7 @@ async function loadMoreComments() {
   ];
 
   for (const selector of loadMoreSelectors) {
-    const el = article.querySelector(selector);
+    const el = root.querySelector(selector);
     if (el) {
       const btn = el.closest('button') || el;
       btn.click();
@@ -316,8 +451,8 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 2: Look for load more button by SVG icon (circle/plus pattern)
-  const allButtons = article.querySelectorAll('button');
+  // Strategy 2: SVG icon buttons (circle/plus)
+  const allButtons = root.querySelectorAll('button');
   for (const btn of allButtons) {
     const svg = btn.querySelector('svg');
     const text = btn.textContent?.trim();
@@ -331,8 +466,8 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 3: Look for text-based load more buttons
-  const spans = article.querySelectorAll('span, div[role="button"]');
+  // Strategy 3: Text-based load more buttons
+  const spans = root.querySelectorAll('span, div[role="button"]');
   for (const el of spans) {
     const text = el.textContent?.toLowerCase()?.trim() || '';
     if (text === 'load more' || text === 'muat lainnya' || text === 'more comments'
@@ -343,20 +478,26 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 4: Scroll the comments container
+  // Strategy 4: Bidirectional scroll
   const commentContainer = findCommentContainer();
   if (commentContainer) {
+    // Scroll down first
     commentContainer.scrollTop = commentContainer.scrollHeight;
+    await sleep(400);
+    // Then try a small scroll up to trigger loading older comments
+    if (commentContainer.scrollTop > 200) {
+      commentContainer.scrollTop = Math.max(0, commentContainer.scrollTop - 150);
+      await sleep(200);
+      commentContainer.scrollTop = commentContainer.scrollHeight;
+    }
   }
 }
 
 function findCommentContainer() {
-  // Try to find the scrollable comments container within article
-  const article = document.querySelector('article');
-  const searchRoot = article || document;
+  const root = getPostRoot();
 
-  // Look for elements with specific roles first
-  const sections = searchRoot.querySelectorAll('section, div[role="presentation"], div[role="dialog"]');
+  // Look for scrollable sections/roles first
+  const sections = root.querySelectorAll('section, div[role="presentation"], div[role="dialog"]');
   for (const section of sections) {
     if (section.scrollHeight > section.clientHeight + 50 && section.clientHeight > 100) {
       const hasLinks = section.querySelectorAll('a[href^="/"]').length > 2;
@@ -367,8 +508,8 @@ function findCommentContainer() {
     }
   }
 
-  // Fallback: any scrollable element with comments
-  const candidates = searchRoot.querySelectorAll('ul, div');
+  // Fallback: scrollable ul/div with comments
+  const candidates = root.querySelectorAll('ul, div');
   for (const el of candidates) {
     if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 100) {
       const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
@@ -383,24 +524,23 @@ function findCommentContainer() {
 
 function waitForDOMUpdate(timeout) {
   return new Promise(resolve => {
-    const article = document.querySelector('article') || document.body;
+    const root = getPostRoot();
+    const target = (root === document) ? document.body : root;
     let resolved = false;
 
     const observer = new MutationObserver(() => {
       if (!resolved) {
         resolved = true;
         observer.disconnect();
-        // Give a small additional delay for rendering
         setTimeout(resolve, 200);
       }
     });
 
-    observer.observe(article, {
+    observer.observe(target, {
       childList: true,
       subtree: true
     });
 
-    // Fallback timeout
     setTimeout(() => {
       if (!resolved) {
         resolved = true;

@@ -8,7 +8,7 @@
 </head>
 <body>
   <div class="container">
-    <h1>📊 IG Comment Analyzer</h1>
+    <h1>IG Comment Analyzer</h1>
 
     <!-- API Key Section -->
     <div class="section" id="api-section">
@@ -60,27 +60,52 @@
       </div>
 
       <div class="result-card">
-        <h3>📝 Ringkasan</h3>
+        <h3>Ringkasan</h3>
         <p id="result-summary"></p>
       </div>
 
       <div class="result-card">
-        <h3>💬 Sentimen</h3>
+        <h3>Sentimen</h3>
         <div id="result-sentiment"></div>
       </div>
 
       <div class="result-card">
-        <h3>🔖 Topik Utama</h3>
+        <h3>Topik Utama</h3>
         <div id="result-topics"></div>
       </div>
 
       <div class="result-card">
-        <h3>⭐ Komentar Menarik</h3>
+        <h3>Komentar Menarik</h3>
         <div id="result-highlights"></div>
       </div>
+
+      <!-- Comment List by Sentiment -->
+      <div class="result-card">
+        <h3>Daftar Komentar per Sentimen</h3>
+        <div class="sentiment-tabs">
+          <button class="sentiment-tab active" data-tab="positif">
+            Positif <span id="count-positif" class="tab-badge positive-badge">0</span>
+          </button>
+          <button class="sentiment-tab" data-tab="negatif">
+            Negatif <span id="count-negatif" class="tab-badge negative-badge">0</span>
+          </button>
+          <button class="sentiment-tab" data-tab="netral">
+            Netral <span id="count-netral" class="tab-badge neutral-badge">0</span>
+          </button>
+        </div>
+        <div id="comment-list-positif" class="comment-list-panel active"></div>
+        <div id="comment-list-negatif" class="comment-list-panel"></div>
+        <div id="comment-list-netral" class="comment-list-panel"></div>
+      </div>
+
+      <!-- Download PDF Button -->
+      <button id="download-pdf-btn" class="btn-download">
+        Download PDF
+      </button>
     </div>
   </div>
 
+  <script src="lib/jspdf.umd.min.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

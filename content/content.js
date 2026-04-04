@@ -638,6 +638,7 @@ async function loadMoreComments() {
     'button[aria-label="Lihat komentar lainnya"]'
   ];
 
+  // Strategy 1: Click load-more buttons by aria-label
   for (const selector of loadMoreSelectors) {
     const el = root.querySelector(selector);
     if (el) {
@@ -648,34 +649,22 @@ async function loadMoreComments() {
     }
   }
 
-  const allButtons = root.querySelectorAll('button');
-  for (const btn of allButtons) {
-    const svg = btn.querySelector('svg');
-    const text = btn.textContent?.trim();
-    if (svg && (!text || text.length < 3)) {
-      const parent = btn.closest('ul') || btn.closest('section');
-      if (parent) {
-        btn.click();
-        await randomDelay(600, 1000);
-        return;
-      }
-    }
-  }
-
-  const spans = root.querySelectorAll('span, div[role="button"]');
-  for (const el of spans) {
+  // Strategy 2: Click text-based load more buttons
+  const clickables = root.querySelectorAll('span, button, div[role="button"], a');
+  for (const el of clickables) {
     const text = el.textContent?.toLowerCase()?.trim() || '';
     if (text === 'load more' || text === 'muat lainnya' || text === 'more comments'
-      || text === 'komentar lainnya') {
+      || text === 'komentar lainnya'
+      || (text.includes('+') && /^\+\s*\d+/.test(text))) {
       el.click();
       await randomDelay(600, 1000);
       return;
     }
   }
 
+  // Strategy 3: Always scroll the comment container to trigger lazy loading
   const commentContainer = findCommentContainer();
   if (commentContainer) {
-    // Always scroll to bottom to trigger lazy loading of more comments
     commentContainer.scrollTop = commentContainer.scrollHeight;
     await randomDelay(300, 600);
     if (commentContainer.scrollTop > 200) {

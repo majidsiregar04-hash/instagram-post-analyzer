@@ -81,7 +81,7 @@ async function scrapeComments(limit) {
       previousCount = comments.length;
     }
 
-    if (noNewCount >= 4 || scrollAttempts >= maxScrollAttempts) {
+    if (noNewCount >= 6 || scrollAttempts >= maxScrollAttempts) {
       break;
     }
 
@@ -95,8 +95,8 @@ async function scrapeComments(limit) {
 
     // If scroll didn't change AND no new comments, accelerate termination
     const newScrollHeight = container ? container.scrollHeight : 0;
-    if (container && newScrollHeight === prevScrollHeight && comments.length === previousCount) {
-      noNewCount += 2;
+    if (container && newScrollHeight === prevScrollHeight && comments.length === previousCount && noNewCount >= 2) {
+      noNewCount++;
     }
   }
 
@@ -675,10 +675,7 @@ async function loadMoreComments() {
 
   const commentContainer = findCommentContainer();
   if (commentContainer) {
-    // Check if already at the bottom - don't scroll if nothing more to load
-    const distanceFromBottom = commentContainer.scrollHeight - commentContainer.scrollTop - commentContainer.clientHeight;
-    if (distanceFromBottom < 10) return;
-
+    // Always scroll to bottom to trigger lazy loading of more comments
     commentContainer.scrollTop = commentContainer.scrollHeight;
     await randomDelay(300, 600);
     if (commentContainer.scrollTop > 200) {

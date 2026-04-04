@@ -1,8 +1,11 @@
-// Background service worker: handle Gemini API calls
+// Background service worker: handle Gemini API calls and report tab
 
 const GEMINI_MODEL = 'gemini-2.0-flash';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 const BATCH_SIZE = 80;
+
+// Store report data in memory (fast, no storage overhead)
+let pendingReportData = null;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'analyzeComments') {
@@ -10,6 +13,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ error: err.message }));
     return true;
+  }
+
+  if (request.action === 'openReport') {
+    // Store data in memory and open report.html in new tab
+    pendingReportData = request.data;
+    chrome.tabs.create({ url: chrome.runtime.getURL('popup/report.html') });
+    sendResponse({ ok: true });
+    return;
+  }
+
+  if (request.action === 'getReportData') {
+    // report.html requests the stored data
+    sendResponse({ data: pendingReportData });
+    return;
   }
 });
 
@@ -20,21 +37,17 @@ async function analyzeComments(comments) {
   }
 
   if (comments.length <= BATCH_SIZE) {
-    // Single batch: get full analysis + per-comment classification
     return await analyzeFullBatch(comments, geminiApiKey);
   }
 
-  // Multiple batches: first batch gets full analysis, subsequent batches only classify
   const batches = [];
   for (let i = 0; i < comments.length; i += BATCH_SIZE) {
     batches.push(comments.slice(i, i + BATCH_SIZE));
   }
 
-  // First batch: full analysis
   const result = await analyzeFullBatch(batches[0], geminiApiKey);
   const allClassifications = result.klasifikasi_komentar || [];
 
-  // Subsequent batches: classification only
   for (let i = 1; i < batches.length; i++) {
     const batchResult = await classifyBatch(batches[i], i * BATCH_SIZE, geminiApiKey);
     if (batchResult.klasifikasi_komentar) {

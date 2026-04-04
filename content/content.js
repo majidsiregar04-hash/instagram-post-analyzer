@@ -662,7 +662,7 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 3: Always scroll the comment container to trigger lazy loading
+  // Strategy 3: Scroll the comment container to trigger lazy loading
   const commentContainer = findCommentContainer();
   if (commentContainer) {
     commentContainer.scrollTop = commentContainer.scrollHeight;
@@ -672,32 +672,76 @@ async function loadMoreComments() {
       await randomDelay(150, 350);
       commentContainer.scrollTop = commentContainer.scrollHeight;
     }
+    return;
   }
+
+  // Strategy 4: Last resort - scroll the whole page
+  window.scrollBy(0, 500);
+  await randomDelay(300, 600);
+  window.scrollBy(0, -100);
+  await randomDelay(150, 350);
+  window.scrollBy(0, 200);
 }
 
 function findCommentContainer() {
-  const root = getPostRoot();
-
-  const sections = root.querySelectorAll('section, div[role="presentation"], div[role="dialog"]');
-  for (const section of sections) {
-    if (section.scrollHeight > section.clientHeight + 50 && section.clientHeight > 100) {
-      const hasLinks = section.querySelectorAll('a[href^="/"]').length > 2;
-      const hasSpans = section.querySelectorAll('span[dir="auto"]').length > 2;
-      if (hasLinks && hasSpans) {
-        return section;
+  // Strategy 1: Look for the scrollable container in modal view
+  // In modal, comments are in a scrollable div inside the dialog
+  const dialog = document.querySelector('div[role="dialog"]');
+  if (dialog) {
+    // Find all scrollable elements inside the dialog
+    const allDivs = dialog.querySelectorAll('div');
+    for (const div of allDivs) {
+      const style = window.getComputedStyle(div);
+      const overflowY = style.overflowY;
+      if ((overflowY === 'auto' || overflowY === 'scroll') && div.clientHeight > 50) {
+        return div;
+      }
+    }
+    // Fallback: find a div that has more content than visible
+    for (const div of allDivs) {
+      if (div.scrollHeight > div.clientHeight + 20 && div.clientHeight > 50) {
+        const hasUl = div.querySelector('ul');
+        if (hasUl) return div;
       }
     }
   }
 
-  const candidates = root.querySelectorAll('ul, div');
-  for (const el of candidates) {
-    if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 100) {
-      const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
-      const hasSpans = el.querySelectorAll('span[dir="auto"]').length > 2;
-      if (hasLinks && hasSpans) {
-        return el;
-      }
+  // Strategy 2: Direct page view - look for scrollable elements within article
+  const root = getPostRoot();
+  const allElements = root.querySelectorAll('div, section, ul');
+  for (const el of allElements) {
+    const style = window.getComputedStyle(el);
+    const overflowY = style.overflowY;
+    if ((overflowY === 'auto' || overflowY === 'scroll') && el.clientHeight > 50) {
+      return el;
     }
+  }
+
+  // Strategy 3: Find any element with more content than visible that contains comments
+  for (const el of allElements) {
+    if (el.scrollHeight > el.clientHeight + 20 && el.clientHeight > 50) {
+      const hasUl = el.querySelector('ul');
+      if (hasUl) return el;
+    }
+  }
+
+  // Strategy 4: Walk up from article element to find scrollable parent
+  let current = root;
+  while (current && current !== document.body) {
+    const style = window.getComputedStyle(current);
+    if ((style.overflowY === 'auto' || style.overflowY === 'scroll')
+      && current.clientHeight > 50) {
+      return current;
+    }
+    if (current.scrollHeight > current.clientHeight + 20 && current.clientHeight > 50) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+
+  // Last resort: use the root element itself or the article's parent
+  if (root !== document) {
+    return root.parentElement || root;
   }
   return null;
 }

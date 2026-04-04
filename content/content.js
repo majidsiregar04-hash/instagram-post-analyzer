@@ -229,7 +229,7 @@ function extractCommentsFromDOM(postOwner) {
   return comments;
 }
 
-// Simplified comment parser: find username, then get text from the right container
+// Parse a comment from an <li> element
 function parseCommentFromLi(li) {
   // Find username link
   const usernameLink = findUsernameLink(li);
@@ -242,10 +242,8 @@ function parseCommentFromLi(li) {
   if (!username || username.includes('?') || username.includes('explore')
     || username.length > 30) return null;
 
-  // Strategy: find the text container that holds the comment
-  // In Instagram's DOM, the comment text is typically in a <span> container
-  // that is a sibling or near-sibling of the username element
-  const commentText = extractCommentText(li, username, usernameLink);
+  // Find the best comment text span
+  const commentText = extractCommentText(li, username);
 
   if (!commentText || commentText.length < 1) return null;
 
@@ -258,19 +256,12 @@ function parseCommentFromLi(li) {
 }
 
 function findUsernameLink(li) {
-  // Try direct children first
   const links = li.querySelectorAll('a[href^="/"]');
   for (const link of links) {
     const href = link.getAttribute('href');
     if (!href || href === '/' || href.includes('/p/') || href.includes('/reel/')
       || href.includes('/explore/') || href.includes('/stories/')
       || href.includes('/accounts/')) continue;
-    // Check it looks like a username link (short text, no weird paths)
-    const text = link.textContent?.trim();
-    if (text && text.length > 0 && text.length <= 30 && !text.includes(' ')) {
-      return link;
-    }
-    // Also accept if href is simple /username/
     const cleanHref = href.replace(/\//g, '');
     if (cleanHref.length > 0 && cleanHref.length <= 30 && !cleanHref.includes('?')) {
       return link;
@@ -279,133 +270,91 @@ function findUsernameLink(li) {
   return null;
 }
 
-// Extract comment text using innerText from the right container
-function extractCommentText(li, username, usernameLink) {
-  // Find the container that holds both the username and the comment text
-  // Walk up from usernameLink to find the comment content div
-  // Then get its full text and strip the username part
+// Extract comment text: find the right span[dir="auto"] that contains the comment
+function extractCommentText(li, username) {
+  // Instagram puts comment text in span[dir="auto"] elements
+  // We want the one that is the actual comment, not username/action/timestamp
+  const spans = li.querySelectorAll('span[dir="auto"]');
+  let bestText = '';
 
-  // Approach 1: Find the closest common container of username + comment text
-  // In IG's DOM, the comment is in a span near the username span
-  // The parent of the username link often contains the comment text too
+  for (const span of spans) {
+    // Skip spans inside nested reply lists (ul within this li)
+    const parentLi = span.closest('li');
+    if (parentLi !== li) continue;
 
-  // Try: get the parent container that holds the comment block
-  let textContainer = usernameLink.parentElement;
+    const text = span.textContent?.trim();
+    if (!text || text.length < 1) continue;
 
-  // Walk up a few levels to find a container with substantial text
-  for (let i = 0; i < 4; i++) {
-    if (!textContainer || textContainer === li) break;
-    const innerText = getCleanInnerText(textContainer);
-    // If this container has more text than just the username, use it
-    if (innerText.length > username.length + 5) {
-      break;
+    // Skip if it's the username
+    if (text === username) continue;
+
+    // Skip action text and timestamps
+    if (isActionText(text) || isTimestamp(text)) continue;
+
+    // This span contains comment text - collect it with emoji support
+    const fullText = collectSpanText(span, username);
+    if (!fullText) continue;
+
+    // Pick the longest valid text (the actual comment, not fragments)
+    if (fullText.length > bestText.length) {
+      bestText = fullText;
     }
-    textContainer = textContainer.parentElement;
   }
 
-  if (!textContainer || textContainer === li) {
-    // Fallback: use the li's direct text content approach
-    textContainer = li;
+  // Clean up: strip username prefix/suffix
+  if (bestText && username) {
+    if (bestText.toLowerCase().startsWith(username.toLowerCase())) {
+      bestText = bestText.slice(username.length).trim();
+    }
+    if (bestText.toLowerCase().endsWith(username.toLowerCase())) {
+      bestText = bestText.slice(0, -username.length).trim();
+    }
   }
 
-  // Get innerText of the text container
-  let fullText = getCleanInnerText(textContainer);
-
-  // Strip the username from the beginning
-  if (fullText.startsWith(username)) {
-    fullText = fullText.slice(username.length).trim();
-  }
-  // Also handle case-insensitive match
-  if (fullText.toLowerCase().startsWith(username.toLowerCase())) {
-    fullText = fullText.slice(username.length).trim();
-  }
-
-  // Remove trailing action texts (Reply, Balas, timestamps, likes count, etc.)
-  fullText = stripTrailingActions(fullText);
-
-  // Remove leading/trailing whitespace and normalize
-  fullText = fullText.replace(/\s+/g, ' ').trim();
-
-  // Validate: not too short, not just action text
-  if (!fullText || fullText.length < 1 || isActionText(fullText) || isTimestamp(fullText)) {
-    return null;
-  }
-
-  return fullText;
+  return bestText;
 }
 
-// Get cleaned innerText, excluding nested reply lists and action buttons
-function getCleanInnerText(element) {
-  // Clone the element to manipulate without affecting DOM
-  const clone = element.cloneNode(true);
+// Collect text from a span and its siblings (handles emoji split across spans)
+function collectSpanText(span, username) {
+  const parent = span.parentElement;
+  if (!parent) return span.textContent?.trim() || '';
 
-  // Remove nested <ul> elements (reply threads)
-  clone.querySelectorAll('ul').forEach(ul => ul.remove());
+  // Check if parent has multiple child nodes (emoji splitting case)
+  const children = parent.childNodes;
+  if (children.length <= 1) return span.textContent?.trim() || '';
 
-  // Remove time elements
-  clone.querySelectorAll('time').forEach(t => t.remove());
-
-  // Remove buttons that are action buttons (Reply, Like, etc.)
-  clone.querySelectorAll('button').forEach(btn => {
-    const text = btn.textContent?.trim()?.toLowerCase() || '';
-    if (isActionText(text) || text.length < 15) {
-      btn.remove();
-    }
-  });
-
-  // Remove "View replies" / "Lihat balasan" spans/divs
-  clone.querySelectorAll('span, div[role="button"]').forEach(el => {
-    const text = el.textContent?.trim()?.toLowerCase() || '';
-    if (isActionText(text) || isTimestamp(text)) {
-      el.remove();
-    }
-  });
-
-  // Remove SVG icons
-  clone.querySelectorAll('svg').forEach(svg => svg.remove());
-
-  // Get the remaining text
-  let text = clone.innerText || clone.textContent || '';
-
-  // Replace image alt text (emoji) properly
-  // Actually innerText should handle this fine
-
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-// Strip trailing action text patterns from comment text
-function stripTrailingActions(text) {
-  // Common trailing patterns: "Reply", "Balas", "1h", "2d", "3 suka", etc.
-  // These appear after the comment text in the container
-  const trailingPatterns = [
-    /\s+(Reply|Balas|Suka|Like|Liked|Send|Kirim)\s*$/i,
-    /\s+\d+\s*(jam|menit|detik|hari|minggu|bulan|tahun)\s*(yang\s+lalu|lalu)?\s*$/i,
-    /\s+\d+\s*(hour|minute|second|day|week|month|year)s?\s*ago\s*$/i,
-    /\s+\d+[smhdwSMHDW]\s*$/,
-    /\s+\d+\s*(likes?|suka)\s*$/i,
-    /\s+(just now|baru saja)\s*$/i,
-    /\s+See translation\s*$/i,
-    /\s+Lihat terjemahan\s*$/i,
-    /\s+(Edited|Diedit)\s*$/i,
-    /\s+\d{1,2}\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s*$/i
-  ];
-
-  let result = text;
-  let changed = true;
-  let iterations = 0;
-  while (changed && iterations < 5) {
-    changed = false;
-    iterations++;
-    for (const pattern of trailingPatterns) {
-      const newResult = result.replace(pattern, '');
-      if (newResult !== result) {
-        result = newResult;
-        changed = true;
+  // Combine all child text/emoji, filtering out username and action text
+  let combined = '';
+  for (const child of children) {
+    let childText = '';
+    if (child.nodeType === Node.TEXT_NODE) {
+      childText = child.textContent || '';
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      const tag = child.tagName?.toLowerCase();
+      if (tag === 'img') {
+        childText = child.alt || '';
+      } else if (tag === 'span' || tag === 'a' || tag === 'br') {
+        childText = child.textContent || '';
       }
     }
+
+    const trimmed = childText.trim();
+    if (trimmed === username) continue;
+    if (trimmed && isActionText(trimmed)) continue;
+    if (trimmed && isTimestamp(trimmed)) continue;
+
+    combined += childText;
   }
 
-  return result.trim();
+  combined = combined.replace(/\s+/g, ' ').trim();
+
+  // Sanity check: if combined is way too long, original span text is safer
+  const originalText = span.textContent?.trim() || '';
+  if (combined.length > originalText.length * 3 && originalText.length > 5) {
+    return originalText;
+  }
+
+  return combined || originalText;
 }
 
 function extractCommentsFallback(postOwner) {

@@ -632,22 +632,7 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 2: SVG icon buttons (circle/plus)
-  const allButtons = root.querySelectorAll('button');
-  for (const btn of allButtons) {
-    const svg = btn.querySelector('svg');
-    const text = btn.textContent?.trim();
-    if (svg && (!text || text.length < 3)) {
-      const parent = btn.closest('ul') || btn.closest('section');
-      if (parent) {
-        btn.click();
-        await sleep(800);
-        return;
-      }
-    }
-  }
-
-  // Strategy 3: Text-based load more buttons
+  // Strategy 2: Text-based load more buttons
   const spans = root.querySelectorAll('span, div[role="button"]');
   for (const el of spans) {
     const text = el.textContent?.toLowerCase()?.trim() || '';
@@ -659,7 +644,7 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 4: Bidirectional scroll
+  // Strategy 3: Bidirectional scroll
   const commentContainer = findCommentContainer();
   if (commentContainer) {
     // Scroll down first

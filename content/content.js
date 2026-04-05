@@ -647,40 +647,49 @@ async function loadMoreComments() {
   // Strategy 3: Container scroll — gradual, human-like
   const commentContainer = findCommentContainer();
   if (commentContainer) {
-    const scrollStep = Math.min(400, commentContainer.clientHeight * 0.7);
-    const remaining = commentContainer.scrollHeight - commentContainer.scrollTop - commentContainer.clientHeight;
+    const viewHeight = commentContainer.clientHeight;
+    const scrollStep = Math.max(150, Math.floor(viewHeight * 0.6));
+    const maxScroll = commentContainer.scrollHeight - viewHeight;
+    const currentScroll = commentContainer.scrollTop;
 
-    if (remaining > 0) {
-      // Scroll down in steps
-      const steps = Math.min(3, Math.ceil(remaining / scrollStep));
-      for (let i = 0; i < steps; i++) {
-        commentContainer.scrollBy({ top: scrollStep, behavior: 'smooth' });
-        await sleep(300 + Math.random() * 200);
+    if (currentScroll < maxScroll - 10) {
+      // Scroll down in incremental steps
+      const target = Math.min(currentScroll + scrollStep * 3, maxScroll);
+      let pos = currentScroll;
+      while (pos < target) {
+        pos = Math.min(pos + scrollStep, target);
+        commentContainer.scrollTop = pos;
+        await sleep(250 + Math.random() * 150);
       }
     } else {
-      // Already at bottom — small scroll up then back down to trigger lazy load
-      commentContainer.scrollBy({ top: -150, behavior: 'smooth' });
-      await sleep(400);
-      commentContainer.scrollBy({ top: 300, behavior: 'smooth' });
+      // At bottom — bounce up then down to trigger lazy load
+      commentContainer.scrollTop = Math.max(0, currentScroll - 150);
+      await sleep(350);
+      commentContainer.scrollTop = commentContainer.scrollHeight;
       await sleep(300);
     }
     return;
   }
 
   // Strategy 4: Page-level scroll — gradual, human-like
-  const pageScrollStep = Math.min(500, window.innerHeight * 0.7);
-  const pageRemaining = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+  const docEl = document.documentElement;
+  const pageViewHeight = window.innerHeight;
+  const pageScrollStep = Math.max(200, Math.floor(pageViewHeight * 0.6));
+  const pageMaxScroll = docEl.scrollHeight - pageViewHeight;
+  const pageCurrentScroll = window.scrollY || window.pageYOffset;
 
-  if (pageRemaining > 0) {
-    const steps = Math.min(3, Math.ceil(pageRemaining / pageScrollStep));
-    for (let i = 0; i < steps; i++) {
-      window.scrollBy({ top: pageScrollStep, behavior: 'smooth' });
-      await sleep(300 + Math.random() * 200);
+  if (pageCurrentScroll < pageMaxScroll - 10) {
+    const target = Math.min(pageCurrentScroll + pageScrollStep * 3, pageMaxScroll);
+    let pos = pageCurrentScroll;
+    while (pos < target) {
+      pos = Math.min(pos + pageScrollStep, target);
+      window.scrollTo(0, pos);
+      await sleep(250 + Math.random() * 150);
     }
   } else {
-    window.scrollBy({ top: -150, behavior: 'smooth' });
-    await sleep(400);
-    window.scrollBy({ top: 300, behavior: 'smooth' });
+    window.scrollTo(0, Math.max(0, pageCurrentScroll - 150));
+    await sleep(350);
+    window.scrollTo(0, docEl.scrollHeight);
     await sleep(300);
   }
 }

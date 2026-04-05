@@ -51,6 +51,10 @@ document.querySelectorAll('.sentiment-tab').forEach(tab => {
   });
 });
 
+// Scraping state
+let scrapingPort = null;
+const doneBtn = document.getElementById('done-btn');
+
 // Main scrape & analyze action
 scrapeBtn.addEventListener('click', async () => {
   errorSection.classList.add('hidden');
@@ -61,48 +65,92 @@ scrapeBtn.addEventListener('click', async () => {
   const limit = parseInt(commentLimit.value, 10);
 
   try {
-    updateProgress(10, 'Memulai scraping komentar...');
-
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
     if (!tab || !tab.url || (!tab.url.includes('instagram.com/p/') && !tab.url.includes('instagram.com/reel/'))) {
       throw new Error('Buka halaman post Instagram terlebih dahulu.');
     }
 
-    // Ensure content script is injected (handles SPA navigation)
+    // Ensure content script is injected
     await ensureContentScript(tab.id);
 
-    const comments = await sendMessageToContentScript(tab.id, {
-      action: 'scrapeComments',
-      limit: limit
+    // Connect port to content script
+    scrapingPort = chrome.tabs.connect(tab.id, { name: 'scraping' });
+
+    // Show scraping UI
+    progressFill.classList.add('pulsing');
+    progressText.textContent = 'Scroll halaman Instagram ke bawah... 0 komentar ditemukan';
+    doneBtn.classList.remove('hidden');
+
+    // Listen for progress and done messages
+    scrapingPort.onMessage.addListener(async (msg) => {
+      if (msg.action === 'progress') {
+        progressText.textContent = `Scroll halaman Instagram ke bawah... ${msg.count} komentar ditemukan`;
+      }
+
+      if (msg.action === 'done') {
+        const comments = msg.comments;
+        doneBtn.classList.add('hidden');
+        progressFill.classList.remove('pulsing');
+        scrapingPort = null;
+
+        if (!comments || comments.length === 0) {
+          showError('Tidak ada komentar yang ditemukan. Pastikan post memiliki komentar.');
+          scrapeBtn.disabled = false;
+          return;
+        }
+
+        lastComments = comments;
+        updateProgress(60, `${comments.length} komentar ditemukan. Menganalisis...`);
+
+        try {
+          const analysis = await chrome.runtime.sendMessage({
+            action: 'analyzeComments',
+            comments: comments,
+            limit: limit
+          });
+
+          if (analysis.error) {
+            throw new Error(analysis.error);
+          }
+
+          lastAnalysis = analysis;
+          updateProgress(100, 'Selesai!');
+          displayResults(comments.length, analysis, comments);
+        } catch (err) {
+          showError(err.message);
+        } finally {
+          scrapeBtn.disabled = false;
+        }
+      }
     });
 
-    if (!comments || comments.length === 0) {
-      throw new Error('Tidak ada komentar yang ditemukan. Pastikan post memiliki komentar.');
-    }
-
-    lastComments = comments;
-    updateProgress(50, `${comments.length} komentar ditemukan. Menganalisis...`);
-
-    const analysis = await chrome.runtime.sendMessage({
-      action: 'analyzeComments',
-      comments: comments,
-      limit: limit
+    scrapingPort.onDisconnect.addListener(() => {
+      if (scrapingPort) {
+        // Unexpected disconnect
+        scrapingPort = null;
+        doneBtn.classList.add('hidden');
+        progressFill.classList.remove('pulsing');
+        showError('Koneksi terputus. Pastikan halaman Instagram masih terbuka.');
+        scrapeBtn.disabled = false;
+      }
     });
 
-    if (analysis.error) {
-      throw new Error(analysis.error);
-    }
-
-    lastAnalysis = analysis;
-    updateProgress(100, 'Selesai!');
-
-    displayResults(comments.length, analysis, comments);
+    // Tell content script to start scraping
+    scrapingPort.postMessage({ action: 'start', limit: limit });
 
   } catch (err) {
     showError(err.message);
-  } finally {
     scrapeBtn.disabled = false;
+  }
+});
+
+// Done button — stop scraping and proceed to analysis
+doneBtn.addEventListener('click', () => {
+  if (scrapingPort) {
+    doneBtn.classList.add('hidden');
+    progressText.textContent = 'Menyelesaikan scraping...';
+    scrapingPort.postMessage({ action: 'stop' });
   }
 });
 
@@ -138,22 +186,6 @@ async function ensureContentScript(tabId) {
 
   // Wait a moment for the script to initialize
   await new Promise(r => setTimeout(r, 500));
-}
-
-function sendMessageToContentScript(tabId, message) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error('Gagal terhubung ke halaman. Coba refresh halaman Instagram.'));
-        return;
-      }
-      if (response && response.error) {
-        reject(new Error(response.error));
-        return;
-      }
-      resolve(response ? response.comments : []);
-    });
-  });
 }
 
 function updateProgress(percent, text) {

@@ -1,17 +1,133 @@
-// Content script: scrape Instagram post comments with auto-scroll
+// Content script: scrape Instagram post comments with manual scroll
 
+// Scraping state
+let scrapingActive = false;
+let scrapingInterval = null;
+let scrapeInProgress = false;
+let seenTexts = new Set();
+let allComments = [];
+let postOwner = null;
+let scrapingLimit = 0;
+let scrapingPort = null;
+
+// Keep ping handler for ensureContentScript()
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'scrapeComments') {
-    scrapeComments(request.limit || 0)
-      .then((comments) => sendResponse({ comments }))
-      .catch((err) => sendResponse({ error: err.message }));
-    return true;
-  }
   if (request.action === 'ping') {
     sendResponse({ pong: true });
     return;
   }
 });
+
+// Port-based scraping: popup connects, we continuously scrape
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'scraping') return;
+
+  scrapingPort = port;
+
+  port.onMessage.addListener(async (msg) => {
+    if (msg.action === 'start') {
+      scrapingLimit = msg.limit || 0;
+      await startScraping();
+    }
+    if (msg.action === 'stop') {
+      stopScraping();
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    // Popup was closed — clean up
+    cleanupScraping();
+  });
+});
+
+async function startScraping() {
+  // Reset state
+  scrapingActive = true;
+  scrapeInProgress = false;
+  seenTexts = new Set();
+  allComments = [];
+  postOwner = getPostOwnerUsername();
+
+  // Initial expansions
+  await expandTruncatedComments();
+  await clickViewAllComments();
+  await expandHiddenComments();
+  await sleep(500);
+
+  // Run first scrape immediately
+  await scrapeOnce();
+
+  // Start polling interval (every 1.5 seconds)
+  scrapingInterval = setInterval(() => {
+    scrapeOnce();
+  }, 1500);
+}
+
+async function scrapeOnce() {
+  if (!scrapingActive || scrapeInProgress) return;
+  scrapeInProgress = true;
+
+  try {
+    // Expand replies and truncated comments
+    await expandReplies();
+    await expandTruncatedComments();
+    await clickViewAllComments();
+    await expandHiddenComments();
+
+    // Extract comments from DOM
+    const extracted = extractCommentsFromDOM(postOwner);
+
+    let newCount = 0;
+    for (const comment of extracted) {
+      const normalizedText = comment.text.replace(/\s+/g, ' ').trim().toLowerCase();
+      const key = comment.username.toLowerCase() + '::' + normalizedText;
+      if (!seenTexts.has(key)) {
+        seenTexts.add(key);
+        allComments.push(comment);
+        newCount++;
+      }
+    }
+
+    // Send progress update to popup
+    if (scrapingPort && newCount > 0) {
+      try {
+        scrapingPort.postMessage({ action: 'progress', count: allComments.length });
+      } catch { /* port disconnected */ }
+    }
+
+    // Auto-stop if limit reached
+    if (scrapingLimit > 0 && allComments.length >= scrapingLimit) {
+      stopScraping();
+    }
+  } finally {
+    scrapeInProgress = false;
+  }
+}
+
+function stopScraping() {
+  if (!scrapingActive) return;
+  cleanupScraping();
+
+  // Final dedup
+  const finalComments = deduplicateFinal(
+    scrapingLimit > 0 ? allComments.slice(0, scrapingLimit) : allComments
+  );
+
+  // Send final result
+  if (scrapingPort) {
+    try {
+      scrapingPort.postMessage({ action: 'done', comments: finalComments });
+    } catch { /* port disconnected */ }
+  }
+}
+
+function cleanupScraping() {
+  scrapingActive = false;
+  if (scrapingInterval) {
+    clearInterval(scrapingInterval);
+    scrapingInterval = null;
+  }
+}
 
 // Helper: find the correct root element (handles modal view vs direct page)
 function getPostRoot() {
@@ -27,7 +143,6 @@ function getPostRoot() {
 // Detect the post owner username from the article header
 function getPostOwnerUsername() {
   const root = getPostRoot();
-  // The first username link in the header area is typically the post owner
   const header = root.querySelector('header');
   if (header) {
     const link = header.querySelector('a[href^="/"]');
@@ -39,83 +154,6 @@ function getPostOwnerUsername() {
     }
   }
   return null;
-}
-
-async function scrapeComments(limit) {
-  // Expand truncated comments first
-  await expandTruncatedComments();
-
-  // Try to expand all comments
-  await clickViewAllComments();
-
-  // Try to expand hidden comments
-  await expandHiddenComments();
-
-  await sleep(1000);
-
-  const comments = [];
-  const seenTexts = new Set();
-  let scrollAttempts = 0;
-  const maxScrollAttempts = limit === 0 ? 200 : Math.ceil(limit / 10) + 20;
-  let previousCount = 0;
-  let noNewCount = 0;
-  const postOwner = getPostOwnerUsername();
-
-  while (true) {
-    // Try to click "View all comments" again
-    await clickViewAllComments();
-
-    // Expand reply threads (with retry)
-    await expandReplies();
-    await sleep(300);
-    await expandReplies(); // retry for newly appeared buttons
-
-    // Expand truncated comments
-    await expandTruncatedComments();
-
-    // Extract comments currently in the DOM
-    const extracted = extractCommentsFromDOM(postOwner);
-
-    for (const comment of extracted) {
-      // Normalize dedup key: collapse whitespace, lowercase
-      const normalizedText = comment.text.replace(/\s+/g, ' ').trim().toLowerCase();
-      const key = comment.username.toLowerCase() + '::' + normalizedText;
-      if (!seenTexts.has(key)) {
-        seenTexts.add(key);
-        comments.push(comment);
-      }
-    }
-
-    // Check if we reached the limit
-    if (limit > 0 && comments.length >= limit) {
-      return comments.slice(0, limit);
-    }
-
-    // Check if we've exhausted scrolling
-    if (comments.length === previousCount) {
-      noNewCount++;
-    } else {
-      noNewCount = 0;
-      previousCount = comments.length;
-    }
-
-    // Stop if no new comments after 8 consecutive scroll attempts
-    if (noNewCount >= 8 || scrollAttempts >= maxScrollAttempts) {
-      break;
-    }
-
-    // Try to load more comments
-    await loadMoreComments();
-    scrollAttempts++;
-
-    // Wait for DOM to update
-    await waitForDOMUpdate(800);
-  }
-
-  const result = limit > 0 ? comments.slice(0, limit) : comments;
-
-  // Final dedup pass
-  return deduplicateFinal(result);
 }
 
 // Final dedup: substring, fuzzy similarity, and cross-user identical text
@@ -143,7 +181,6 @@ function deduplicateFinal(comments) {
         break;
       }
 
-      // Fuzzy similarity check
       if (similarity(textI, textJ) > 0.85) {
         if (textI.length >= textJ.length) {
           toRemove.add(j);
@@ -192,18 +229,13 @@ function similarity(a, b) {
 function extractCommentsFromDOM(postOwner) {
   const comments = [];
   const root = getPostRoot();
-  const parsedLis = new Set(); // Track parsed <li> elements to avoid duplicates
+  const parsedLis = new Set();
 
-  // Strategy 1: Find comment lists within the article
-  // Only iterate top-level <ul> (skip nested reply <ul> in outer loop)
   const commentLists = root.querySelectorAll('ul');
 
   for (const ul of commentLists) {
-    // Skip this <ul> if it's nested inside an <li> that's inside another <ul>
-    // (i.e., it's a reply sub-list, not the main comment list)
     const parentLi = ul.parentElement?.closest('li');
     if (parentLi && parentLi.closest('ul') && root.contains(parentLi.closest('ul'))) {
-      // This is a nested reply list - skip in outer loop, will be handled in inner loop
       const grandParentUl = parentLi.closest('ul');
       if (grandParentUl !== ul && root.contains(grandParentUl)) continue;
     }
@@ -218,7 +250,6 @@ function extractCommentsFromDOM(postOwner) {
 
       const comment = parseCommentElement(li);
       if (comment) {
-        // Skip caption (first comment from post owner)
         if (isFirst && postOwner && comment.username === postOwner) {
           isFirst = false;
           continue;
@@ -227,7 +258,6 @@ function extractCommentsFromDOM(postOwner) {
         comments.push(comment);
       }
 
-      // Also extract replies within this li (nested ul > li)
       const replyLists = li.querySelectorAll('ul');
       for (const replyUl of replyLists) {
         const replyItems = replyUl.querySelectorAll(':scope > li');
@@ -245,7 +275,6 @@ function extractCommentsFromDOM(postOwner) {
     }
   }
 
-  // Strategy 2: If strategy 1 found nothing, try fallback
   if (comments.length === 0) {
     return extractCommentsFallback(postOwner);
   }
@@ -265,7 +294,7 @@ function extractCommentsFallback(postOwner) {
 
     const username = href.replace(/\//g, '');
     if (!username || username.includes('?') || username.length > 30) continue;
-    if (username === postOwner) continue; // skip post owner in fallback
+    if (username === postOwner) continue;
 
     const container = link.closest('div[role="button"]')?.parentElement
       || link.closest('li')
@@ -288,14 +317,12 @@ function extractCommentsFallback(postOwner) {
 }
 
 function parseCommentElement(li) {
-  // Skip likes section ("Liked by X and 598 others")
   const liText = li.textContent || '';
   if (/liked\s+by\s+.+\s+and\s+\d+/i.test(liText) ||
       /disukai\s+oleh\s+.+\s+dan\s+\d+/i.test(liText)) {
     return null;
   }
 
-  // Find username link - prefer first link in shallow depth (comment author)
   const usernameLinks = li.querySelectorAll(':scope > div a[href^="/"], :scope > div > div a[href^="/"]');
   let usernameLink = null;
 
@@ -309,7 +336,6 @@ function parseCommentElement(li) {
   }
 
   if (!usernameLink) {
-    // Fallback: first link in the li
     const allLinks = li.querySelectorAll('a[href^="/"]');
     if (allLinks.length > 0) {
       const link = allLinks[0];
@@ -331,12 +357,10 @@ function parseCommentElement(li) {
   if (!username || username.includes('?') || username.includes('explore')
     || username.length > 30) return null;
 
-  // Collect comment text by combining adjacent spans (handles emoji splitting)
   const commentText = collectCommentText(li, username);
 
   if (!commentText) return null;
 
-  // Filter out non-comment text (likes, engagement info)
   if (isNonCommentText(commentText)) return null;
 
   return {
@@ -347,10 +371,7 @@ function parseCommentElement(li) {
   };
 }
 
-// Collect comment text by combining spans, handling emoji splitting
 function collectCommentText(li, username) {
-  // Find the comment text container - usually a span or div near the username
-  // that contains the actual comment with possibly split emoji spans
   const spans = li.querySelectorAll('span[dir="auto"]');
   let bestText = '';
   let bestDepth = Infinity;
@@ -360,24 +381,19 @@ function collectCommentText(li, username) {
     if (!text || text === username || text.length <= 1) continue;
     if (isTimestamp(text) || isActionText(text) || isNonCommentText(text)) continue;
 
-    // Skip spans inside nested reply lists
     const parentLi = span.closest('li');
     if (parentLi !== li) continue;
 
-    // Skip spans inside nested ul (reply threads)
     const parentUl = span.closest('ul');
     const liParentUl = li.closest('ul');
     if (parentUl && liParentUl && parentUl !== liParentUl) {
-      // span is inside a nested ul within this li - skip
       const isNested = li.contains(parentUl) && parentUl !== liParentUl;
       if (isNested) continue;
     }
 
     const depth = getDepth(span, li);
 
-    // Prefer shallower spans (closer to the comment root)
     if (depth < bestDepth || (depth === bestDepth && text.length > bestText.length)) {
-      // Try to get full text including emoji by going up to parent and collecting all child text
       const fullText = collectAdjacentSpanText(span, username);
       if (fullText.length >= text.length) {
         bestText = fullText;
@@ -388,7 +404,6 @@ function collectCommentText(li, username) {
     }
   }
 
-  // Strip username from result if it appears at start/end
   if (bestText && username) {
     if (bestText.toLowerCase().startsWith(username.toLowerCase())) {
       bestText = bestText.slice(username.length).trim();
@@ -401,12 +416,10 @@ function collectCommentText(li, username) {
   return bestText;
 }
 
-// Collect text from a span and its adjacent sibling spans (emoji splitting fix)
 function collectAdjacentSpanText(span, username) {
   const parent = span.parentElement;
   if (!parent) return span.textContent?.trim() || '';
 
-  // Collect text from sibling nodes, but filter out username/action/timestamp text
   const children = parent.childNodes;
   let combinedText = '';
 
@@ -424,7 +437,6 @@ function collectAdjacentSpanText(span, username) {
     }
 
     const trimmed = childText.trim();
-    // Skip if this child's text is the username, action text, or timestamp
     if (trimmed && trimmed === username) continue;
     if (trimmed && isActionText(trimmed)) continue;
     if (trimmed && isTimestamp(trimmed)) continue;
@@ -432,11 +444,8 @@ function collectAdjacentSpanText(span, username) {
     combinedText += childText;
   }
 
-  // Normalize whitespace
   combinedText = combinedText.replace(/\s+/g, ' ').trim();
 
-  // Sanity check: if combined text is unreasonably longer than the original span,
-  // it probably grabbed too much - fall back to original span text
   const originalText = span.textContent?.trim() || '';
   if (combinedText.length > originalText.length * 2.5 && originalText.length > 5) {
     return originalText;
@@ -495,7 +504,6 @@ function isTimestamp(text) {
 
 function isActionText(text) {
   const lower = text.toLowerCase().trim();
-  // Regex patterns for action text with variable numbers
   const patterns = [
     /^(reply|balas)$/i,
     /^(like|suka|liked|disukai)$/i,
@@ -516,7 +524,6 @@ function isActionText(text) {
   return patterns.some(p => p.test(lower));
 }
 
-// Detect non-comment text: likes section, engagement info
 function isNonCommentText(text) {
   const lower = text.toLowerCase().trim();
   const patterns = [
@@ -533,16 +540,14 @@ function isNonCommentText(text) {
   return patterns.some(p => p.test(lower));
 }
 
-// Expand truncated comments ("more" / "lagi" buttons)
 async function expandTruncatedComments() {
   const root = getPostRoot();
   const buttons = root.querySelectorAll('span, button, div[role="button"]');
   let clicked = false;
   for (const btn of buttons) {
     const text = btn.textContent?.trim()?.toLowerCase() || '';
-    // Match "more" / "lagi" / "selengkapnya" but only short text (not "load more comments")
     if ((text === 'more' || text === 'lagi' || text === 'selengkapnya')
-      && btn.offsetParent !== null) { // visible
+      && btn.offsetParent !== null) {
       btn.click();
       clicked = true;
     }
@@ -607,157 +612,6 @@ async function expandReplies() {
   if (clicked) {
     await sleep(800);
   }
-}
-
-async function loadMoreComments() {
-  const root = getPostRoot();
-
-  // Strategy 1: Click by aria-label
-  const loadMoreSelectors = [
-    'button[aria-label="Load more comments"]',
-    'button[aria-label="Muat komentar lainnya"]',
-    'svg[aria-label="Load more comments"]',
-    'svg[aria-label="Muat komentar lainnya"]',
-    'button[aria-label="View more comments"]',
-    'button[aria-label="Lihat komentar lainnya"]'
-  ];
-
-  for (const selector of loadMoreSelectors) {
-    const el = root.querySelector(selector);
-    if (el) {
-      const btn = el.closest('button') || el;
-      btn.click();
-      await sleep(800);
-      return;
-    }
-  }
-
-  // Strategy 2: Text-based load more buttons
-  const spans = root.querySelectorAll('span, div[role="button"]');
-  for (const el of spans) {
-    const text = el.textContent?.toLowerCase()?.trim() || '';
-    if (text === 'load more' || text === 'muat lainnya' || text === 'more comments'
-      || text === 'komentar lainnya') {
-      el.click();
-      await sleep(800);
-      return;
-    }
-  }
-
-  // Strategy 3: Container scroll — gradual, human-like
-  const commentContainer = findCommentContainer();
-  if (commentContainer) {
-    const viewHeight = commentContainer.clientHeight;
-    const scrollStep = Math.max(150, Math.floor(viewHeight * 0.6));
-    const maxScroll = commentContainer.scrollHeight - viewHeight;
-    const currentScroll = commentContainer.scrollTop;
-
-    if (currentScroll < maxScroll - 10) {
-      // Scroll down in incremental steps
-      const target = Math.min(currentScroll + scrollStep * 3, maxScroll);
-      let pos = currentScroll;
-      while (pos < target) {
-        pos = Math.min(pos + scrollStep, target);
-        commentContainer.scrollTop = pos;
-        await sleep(250 + Math.random() * 150);
-      }
-    } else {
-      // At bottom — bounce up then down to trigger lazy load
-      commentContainer.scrollTop = Math.max(0, currentScroll - 150);
-      await sleep(350);
-      commentContainer.scrollTop = commentContainer.scrollHeight;
-      await sleep(300);
-    }
-    return;
-  }
-
-  // Strategy 4: Page-level scroll — gradual, human-like
-  const docEl = document.documentElement;
-  const pageViewHeight = window.innerHeight;
-  const pageScrollStep = Math.max(200, Math.floor(pageViewHeight * 0.6));
-  const pageMaxScroll = docEl.scrollHeight - pageViewHeight;
-  const pageCurrentScroll = window.scrollY || window.pageYOffset;
-
-  if (pageCurrentScroll < pageMaxScroll - 10) {
-    const target = Math.min(pageCurrentScroll + pageScrollStep * 3, pageMaxScroll);
-    let pos = pageCurrentScroll;
-    while (pos < target) {
-      pos = Math.min(pos + pageScrollStep, target);
-      window.scrollTo(0, pos);
-      await sleep(250 + Math.random() * 150);
-    }
-  } else {
-    window.scrollTo(0, Math.max(0, pageCurrentScroll - 150));
-    await sleep(350);
-    window.scrollTo(0, docEl.scrollHeight);
-    await sleep(300);
-  }
-}
-
-function findCommentContainer() {
-  const root = getPostRoot();
-
-  // Helper: check if element has overflowing content with comment-like content
-  function isCommentContainer(el) {
-    if (!el || el === document.body || el === document.documentElement) return false;
-    if (el.clientHeight < 100) return false;
-    if (el.scrollHeight <= el.clientHeight + 50) return false;
-    const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
-    const hasSpans = el.querySelectorAll('span[dir="auto"]').length > 2;
-    return hasLinks && hasSpans;
-  }
-
-  // Strategy 1: Look for scrollable sections/roles within the article root
-  const sections = root.querySelectorAll('section, div[role="presentation"]');
-  for (const section of sections) {
-    if (isCommentContainer(section)) return section;
-  }
-
-  // Strategy 2: Scrollable ul/div within the article root
-  const candidates = root.querySelectorAll('ul, div');
-  for (const el of candidates) {
-    if (isCommentContainer(el)) return el;
-  }
-
-  // Strategy 3: For modal view, search inside the dialog
-  const dialog = document.querySelector('div[role="dialog"]');
-  if (dialog) {
-    const divs = dialog.querySelectorAll('div');
-    for (const div of divs) {
-      if (isCommentContainer(div)) return div;
-    }
-  }
-
-  return null;
-}
-
-function waitForDOMUpdate(timeout) {
-  return new Promise(resolve => {
-    const root = getPostRoot();
-    const target = (root === document) ? document.body : root;
-    let resolved = false;
-
-    const observer = new MutationObserver(() => {
-      if (!resolved) {
-        resolved = true;
-        observer.disconnect();
-        setTimeout(resolve, 200);
-      }
-    });
-
-    observer.observe(target, {
-      childList: true,
-      subtree: true
-    });
-
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        observer.disconnect();
-        resolve();
-      }
-    }, timeout);
-  });
 }
 
 function sleep(ms) {

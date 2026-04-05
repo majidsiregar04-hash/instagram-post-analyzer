@@ -666,31 +666,36 @@ async function loadMoreComments() {
 }
 
 function findCommentContainer() {
-  // Only look for scrollable containers in modal view (dialog).
-  // On direct post pages the whole page scrolls via window.scrollTo,
-  // so we must return null to let the page-level scroll fallback handle it.
-  const dialog = document.querySelector('div[role="dialog"]');
-  if (!dialog) return null;
+  const root = getPostRoot();
 
-  const divs = dialog.querySelectorAll('div');
-  for (const div of divs) {
-    if (div.clientHeight < 50) continue;
-    const hasScroll = div.scrollHeight > div.clientHeight + 20;
-    const style = window.getComputedStyle(div);
-    const hasOverflow = style.overflowY === 'auto' || style.overflowY === 'scroll';
-    if (!hasScroll && !hasOverflow) continue;
-    // Must contain comment-like content (multiple user links + text spans)
-    const hasLinks = div.querySelectorAll('a[href^="/"]').length > 2;
-    const hasSpans = div.querySelectorAll('span[dir="auto"]').length > 2;
-    if (hasLinks && hasSpans) return div;
+  // Helper: check if element has overflowing content with comment-like content
+  function isCommentContainer(el) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    if (el.clientHeight < 100) return false;
+    if (el.scrollHeight <= el.clientHeight + 50) return false;
+    const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
+    const hasSpans = el.querySelectorAll('span[dir="auto"]').length > 2;
+    return hasLinks && hasSpans;
   }
 
-  // Fallback: any scrollable div in the dialog
-  for (const div of divs) {
-    if (div.clientHeight < 50) continue;
-    const style = window.getComputedStyle(div);
-    if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-      return div;
+  // Strategy 1: Look for scrollable sections/roles within the article root
+  const sections = root.querySelectorAll('section, div[role="presentation"]');
+  for (const section of sections) {
+    if (isCommentContainer(section)) return section;
+  }
+
+  // Strategy 2: Scrollable ul/div within the article root
+  const candidates = root.querySelectorAll('ul, div');
+  for (const el of candidates) {
+    if (isCommentContainer(el)) return el;
+  }
+
+  // Strategy 3: For modal view, search inside the dialog
+  const dialog = document.querySelector('div[role="dialog"]');
+  if (dialog) {
+    const divs = dialog.querySelectorAll('div');
+    for (const div of divs) {
+      if (isCommentContainer(div)) return div;
     }
   }
 

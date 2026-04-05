@@ -644,25 +644,45 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 3: Container scroll (modal view)
+  // Strategy 3: Container scroll — gradual, human-like
   const commentContainer = findCommentContainer();
   if (commentContainer) {
-    commentContainer.scrollTop = commentContainer.scrollHeight;
-    await sleep(400);
-    if (commentContainer.scrollTop > 200) {
-      commentContainer.scrollTop = Math.max(0, commentContainer.scrollTop - 150);
-      await sleep(200);
-      commentContainer.scrollTop = commentContainer.scrollHeight;
+    const scrollStep = Math.min(400, commentContainer.clientHeight * 0.7);
+    const remaining = commentContainer.scrollHeight - commentContainer.scrollTop - commentContainer.clientHeight;
+
+    if (remaining > 0) {
+      // Scroll down in steps
+      const steps = Math.min(3, Math.ceil(remaining / scrollStep));
+      for (let i = 0; i < steps; i++) {
+        commentContainer.scrollBy({ top: scrollStep, behavior: 'smooth' });
+        await sleep(300 + Math.random() * 200);
+      }
+    } else {
+      // Already at bottom — small scroll up then back down to trigger lazy load
+      commentContainer.scrollBy({ top: -150, behavior: 'smooth' });
+      await sleep(400);
+      commentContainer.scrollBy({ top: 300, behavior: 'smooth' });
+      await sleep(300);
     }
     return;
   }
 
-  // Strategy 4: Page-level scroll (direct post pages where whole page scrolls)
-  window.scrollTo(0, document.documentElement.scrollHeight);
-  await sleep(400);
-  window.scrollTo(0, Math.max(0, document.documentElement.scrollHeight - 200));
-  await sleep(200);
-  window.scrollTo(0, document.documentElement.scrollHeight);
+  // Strategy 4: Page-level scroll — gradual, human-like
+  const pageScrollStep = Math.min(500, window.innerHeight * 0.7);
+  const pageRemaining = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+
+  if (pageRemaining > 0) {
+    const steps = Math.min(3, Math.ceil(pageRemaining / pageScrollStep));
+    for (let i = 0; i < steps; i++) {
+      window.scrollBy({ top: pageScrollStep, behavior: 'smooth' });
+      await sleep(300 + Math.random() * 200);
+    }
+  } else {
+    window.scrollBy({ top: -150, behavior: 'smooth' });
+    await sleep(400);
+    window.scrollBy({ top: 300, behavior: 'smooth' });
+    await sleep(300);
+  }
 }
 
 function findCommentContainer() {

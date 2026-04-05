@@ -644,73 +644,54 @@ async function loadMoreComments() {
     }
   }
 
-  // Strategy 3: Bidirectional scroll
+  // Strategy 3: Container scroll (modal view)
   const commentContainer = findCommentContainer();
   if (commentContainer) {
-    // Scroll down first
     commentContainer.scrollTop = commentContainer.scrollHeight;
     await sleep(400);
-    // Then try a small scroll up to trigger loading older comments
     if (commentContainer.scrollTop > 200) {
       commentContainer.scrollTop = Math.max(0, commentContainer.scrollTop - 150);
       await sleep(200);
       commentContainer.scrollTop = commentContainer.scrollHeight;
     }
+    return;
   }
+
+  // Strategy 4: Page-level scroll (direct post pages where whole page scrolls)
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  await sleep(400);
+  window.scrollTo(0, Math.max(0, document.documentElement.scrollHeight - 200));
+  await sleep(200);
+  window.scrollTo(0, document.documentElement.scrollHeight);
 }
 
 function findCommentContainer() {
-  const root = getPostRoot();
-
-  // Helper: check if element is scrollable and contains comment content
-  function isCommentScrollable(el) {
-    if (!el || el === document.body || el === document.documentElement) return false;
-    if (el.clientHeight < 50) return false;
-    // Check if it's scrollable (has overflow or scrollable content)
-    const hasScroll = el.scrollHeight > el.clientHeight + 20;
-    const style = window.getComputedStyle(el);
-    const hasOverflow = style.overflowY === 'auto' || style.overflowY === 'scroll';
-    if (!hasScroll && !hasOverflow) return false;
-    // Must contain comment-like content
-    const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
-    const hasSpans = el.querySelectorAll('span[dir="auto"]').length > 2;
-    return hasLinks && hasSpans;
-  }
-
-  // Strategy 1: Search inside the article/root
-  const sections = root.querySelectorAll('section, div, ul');
-  for (const el of sections) {
-    if (isCommentScrollable(el)) return el;
-  }
-
-  // Strategy 2: Walk UP from the article to find scrollable parent
-  let current = root;
-  while (current && current !== document.body) {
-    if (isCommentScrollable(current)) return current;
-    current = current.parentElement;
-  }
-
-  // Strategy 3: For modal view, search inside the entire dialog
+  // Only look for scrollable containers in modal view (dialog).
+  // On direct post pages the whole page scrolls via window.scrollTo,
+  // so we must return null to let the page-level scroll fallback handle it.
   const dialog = document.querySelector('div[role="dialog"]');
-  if (dialog) {
-    const divs = dialog.querySelectorAll('div');
-    for (const div of divs) {
-      if (isCommentScrollable(div)) return div;
-    }
-    // If no scrollable div found with strict check, try any with overflow:auto/scroll
-    for (const div of divs) {
-      if (div.clientHeight < 50) continue;
-      const style = window.getComputedStyle(div);
-      if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-        return div;
-      }
-    }
+  if (!dialog) return null;
+
+  const divs = dialog.querySelectorAll('div');
+  for (const div of divs) {
+    if (div.clientHeight < 50) continue;
+    const hasScroll = div.scrollHeight > div.clientHeight + 20;
+    const style = window.getComputedStyle(div);
+    const hasOverflow = style.overflowY === 'auto' || style.overflowY === 'scroll';
+    if (!hasScroll && !hasOverflow) continue;
+    // Must contain comment-like content (multiple user links + text spans)
+    const hasLinks = div.querySelectorAll('a[href^="/"]').length > 2;
+    const hasSpans = div.querySelectorAll('span[dir="auto"]').length > 2;
+    if (hasLinks && hasSpans) return div;
   }
 
-  // Strategy 4: Search the whole page for comment-like scrollable container
-  const allDivs = document.querySelectorAll('div, section');
-  for (const el of allDivs) {
-    if (isCommentScrollable(el)) return el;
+  // Fallback: any scrollable div in the dialog
+  for (const div of divs) {
+    if (div.clientHeight < 50) continue;
+    const style = window.getComputedStyle(div);
+    if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+      return div;
+    }
   }
 
   return null;

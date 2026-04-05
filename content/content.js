@@ -662,29 +662,57 @@ async function loadMoreComments() {
 function findCommentContainer() {
   const root = getPostRoot();
 
-  // Look for scrollable sections/roles first
-  const sections = root.querySelectorAll('section, div[role="presentation"], div[role="dialog"]');
-  for (const section of sections) {
-    if (section.scrollHeight > section.clientHeight + 50 && section.clientHeight > 100) {
-      const hasLinks = section.querySelectorAll('a[href^="/"]').length > 2;
-      const hasSpans = section.querySelectorAll('span[dir="auto"]').length > 2;
-      if (hasLinks && hasSpans) {
-        return section;
+  // Helper: check if element is scrollable and contains comment content
+  function isCommentScrollable(el) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    if (el.clientHeight < 50) return false;
+    // Check if it's scrollable (has overflow or scrollable content)
+    const hasScroll = el.scrollHeight > el.clientHeight + 20;
+    const style = window.getComputedStyle(el);
+    const hasOverflow = style.overflowY === 'auto' || style.overflowY === 'scroll';
+    if (!hasScroll && !hasOverflow) return false;
+    // Must contain comment-like content
+    const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
+    const hasSpans = el.querySelectorAll('span[dir="auto"]').length > 2;
+    return hasLinks && hasSpans;
+  }
+
+  // Strategy 1: Search inside the article/root
+  const sections = root.querySelectorAll('section, div, ul');
+  for (const el of sections) {
+    if (isCommentScrollable(el)) return el;
+  }
+
+  // Strategy 2: Walk UP from the article to find scrollable parent
+  let current = root;
+  while (current && current !== document.body) {
+    if (isCommentScrollable(current)) return current;
+    current = current.parentElement;
+  }
+
+  // Strategy 3: For modal view, search inside the entire dialog
+  const dialog = document.querySelector('div[role="dialog"]');
+  if (dialog) {
+    const divs = dialog.querySelectorAll('div');
+    for (const div of divs) {
+      if (isCommentScrollable(div)) return div;
+    }
+    // If no scrollable div found with strict check, try any with overflow:auto/scroll
+    for (const div of divs) {
+      if (div.clientHeight < 50) continue;
+      const style = window.getComputedStyle(div);
+      if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+        return div;
       }
     }
   }
 
-  // Fallback: scrollable ul/div with comments
-  const candidates = root.querySelectorAll('ul, div');
-  for (const el of candidates) {
-    if (el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 100) {
-      const hasLinks = el.querySelectorAll('a[href^="/"]').length > 2;
-      const hasSpans = el.querySelectorAll('span[dir="auto"]').length > 2;
-      if (hasLinks && hasSpans) {
-        return el;
-      }
-    }
+  // Strategy 4: Search the whole page for comment-like scrollable container
+  const allDivs = document.querySelectorAll('div, section');
+  for (const el of allDivs) {
+    if (isCommentScrollable(el)) return el;
   }
+
   return null;
 }
 

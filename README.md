@@ -4,13 +4,16 @@ Chrome Extension untuk scrape komentar dari post Instagram dan menganalisisnya m
 
 ## Fitur
 
-- Scrape komentar dari post/reel Instagram dengan auto-scroll
+- Scrape komentar dari post/reel Instagram dengan **scroll manual** + progress real-time di popup
+- Otomatis expand reply, hidden comments, dan komentar terpotong
 - Analisis komentar menggunakan Google Gemini 2.0 Flash
 - Ringkasan komentar secara keseluruhan
-- Analisis sentimen (positif/negatif/netral)
+- Analisis sentimen (positif/negatif/netral) dengan visualisasi bar
 - Identifikasi topik utama
 - Highlight komentar paling menarik
+- Klasifikasi komentar per sentimen dengan tab interaktif
 - Pengaturan batas jumlah komentar (50, 100, 200, 500, atau semua)
+- Export laporan ke halaman report (bisa di-print/save as PDF)
 
 ## Cara Install
 
@@ -28,7 +31,10 @@ Chrome Extension untuk scrape komentar dari post Instagram dan menganalisisnya m
    - Dapatkan API key di [Google AI Studio](https://aistudio.google.com/apikey)
 4. Pilih batas jumlah komentar yang ingin di-scrape
 5. Klik **Scrape & Analisis Komentar**
-6. Tunggu proses scraping dan analisis selesai
+6. **Scroll halaman Instagram ke bawah** secara manual — counter di popup akan update otomatis menunjukkan jumlah komentar yang ditemukan
+7. Klik **Selesai Scraping** jika sudah cukup (atau otomatis berhenti saat limit tercapai)
+8. Tunggu proses analisis Gemini AI selesai
+9. Lihat hasil analisis di popup atau klik **Buka Laporan** untuk view lengkap
 
 ## Struktur Project
 
@@ -37,11 +43,13 @@ Chrome Extension untuk scrape komentar dari post Instagram dan menganalisisnya m
 ├── popup/
 │   ├── popup.html         # UI popup
 │   ├── popup.css          # Styling
-│   └── popup.js           # Logic popup
+│   ├── popup.js           # Logic popup (port-based communication)
+│   ├── report.html        # Halaman laporan
+│   └── report.js          # Logic render laporan
 ├── content/
-│   └── content.js         # Content script (scraping + auto-scroll)
+│   └── content.js         # Content script (DOM scraping + expansion)
 ├── background/
-│   └── background.js      # Service worker (Gemini API)
+│   └── background.js      # Service worker (Gemini API + report data)
 ├── icons/                 # Extension icons
 └── README.md
 ```
